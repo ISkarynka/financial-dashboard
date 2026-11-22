@@ -193,10 +193,94 @@ def apply_style():
             margin-top: .28rem;
             overflow-wrap: anywhere;
         }
+        div.st-key-dashboard_home {
+            max-width: 73rem;
+            margin: clamp(.25rem, 2vw, 1.5rem) auto 0;
+        }
+        div.st-key-home_intro, div.st-key-home_preview {
+            min-height: 26rem;
+            padding: clamp(1.4rem, 2.7vw, 2.4rem);
+            border-radius: 22px;
+        }
+        div.st-key-home_intro {
+            justify-content: center;
+            background: radial-gradient(ellipse at 100% 0%, #235953 0%, transparent 70%), #123433;
+            color: #fff;
+            box-shadow: 0 16px 36px rgba(18, 52, 51, .14);
+        }
+        .fd-home-title {
+            margin: 0;
+            padding: 0;
+            font-size: clamp(2.5rem, 4.65vw, 4.3rem);
+            font-weight: 730;
+            line-height: .99;
+            letter-spacing: -.05em;
+            color: #fff;
+        }
+        .fd-home-copy {
+            max-width: 23rem;
+            margin: 1.15rem 0 .65rem;
+            color: #d0e6e1;
+            font-size: 1.04rem;
+            line-height: 1.6;
+        }
+        div.st-key-data_source_actions button { min-height: 2.75rem; border-radius: 9px; }
+        div.st-key-home_intro button[data-testid="stBaseButton-primary"] {
+            color: #113731;
+            background: #a2e8d3;
+            border-color: #a2e8d3;
+            font-weight: 650;
+        }
+        div.st-key-home_intro button[data-testid="stBaseButton-primary"]:hover {
+            background: #c0f4e4;
+            border-color: #c0f4e4;
+        }
+        div.st-key-home_intro button[data-testid="stBaseButton-secondary"] {
+            color: #f0faf7;
+            background: transparent;
+            border-color: #759891;
+        }
+        div.st-key-home_intro button[data-testid="stBaseButton-secondary"]:hover {
+            background: #28534d;
+            border-color: #a8d0c7;
+        }
+        div.st-key-home_preview {
+            background: #fff;
+            border: 1px solid #d9e7e5;
+            box-shadow: 0 12px 32px rgba(20, 54, 52, .07);
+        }
+        .fd-home-preview h2 { margin: 0; padding: 0; }
+        .fd-home-dates { margin: .25rem 0 0; color: #536979; font-size: .87rem; }
+        .fd-home-metrics {
+            display: grid;
+            grid-template-columns: 1.45fr 1fr .85fr;
+            gap: .85rem;
+            margin: 1rem 0 0;
+            padding: .85rem 0;
+            border-block: 1px solid #e5edeb;
+        }
+        .fd-home-metrics dt { color: #536979; font-size: .8rem; }
+        .fd-home-metrics dd {
+            margin: .15rem 0 0;
+            color: #143b36;
+            font-size: clamp(1.12rem, 2vw, 1.65rem);
+            font-variant-numeric: tabular-nums;
+            font-weight: 710;
+            letter-spacing: -.04em;
+        }
+        @media (max-width: 820px) {
+            div.st-key-dashboard_home [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+            div.st-key-dashboard_home [data-testid="stColumn"] { flex: 1 1 100%; min-width: 0; }
+            div.st-key-home_intro, div.st-key-home_preview { min-height: 0; }
+        }
         @media (max-width: 650px) {
             .fd-hero { border-radius: 13px; }
             .fd-motif { opacity: .14; }
             [data-testid="stTabs"] [role="tab"] { padding: .3rem .45rem; }
+        }
+        @media (max-width: 450px) {
+            .fd-home-metrics { grid-template-columns: 1fr 1fr; }
+            .fd-home-metrics div:first-child { grid-column: 1 / -1; }
         }
         </style>
         """,
@@ -311,6 +395,64 @@ def monthly_line(data, field, label, color=TEAL):
             tooltip=[month_tooltip(), alt.Tooltip(f"{field}:Q", title=label, format=",.2f")],
         )
     )
+
+
+def select_data_mode(mode):
+    st.session_state["data_mode"] = mode
+
+
+def source_actions():
+    with st.container(key="data_source_actions", horizontal=True, gap="small"):
+        st.button(
+            "Explore demo", type="primary", icon=":material/arrow_forward:", icon_position="right",
+            on_click=select_data_mode, args=("demo",),
+        )
+        st.button("Use my data", icon=":material/upload_file:", on_click=select_data_mode, args=("upload",))
+
+
+def show_home(demo_csv):
+    with st.container(key="dashboard_home"):
+        introduction, preview = st.columns([1, 1.2], gap="medium")
+        with introduction, st.container(key="home_intro"):
+            st.markdown(
+                '<h1 class="fd-home-title">Financial<br>Dashboard</h1>'
+                '<p class="fd-home-copy">Explore sales and forecasts, or ask the AI Financial Copilot '
+                'about invoices and unusual transactions.</p>',
+                unsafe_allow_html=True,
+            )
+            source_actions()
+
+        with preview, st.container(key="home_preview"):
+            try:
+                sales = load_data(demo_csv)
+            except (OSError, ValueError):
+                st.info("The demo sales preview is unavailable. You can still upload your own CSV.")
+                return
+            if sales.empty:
+                st.info("The demo CSV has no valid sales to preview.")
+                return
+
+            start = sales["sale_date"].min().date()
+            end = sales["sale_date"].max().date()
+            metrics = calculate_metrics(sales)
+            st.markdown(
+                '<div class="fd-home-preview">'
+                '<h2>Demo sales overview</h2>'
+                f'<p class="fd-home-dates">{start:%b %Y} – {end:%b %Y}</p>'
+                '<dl class="fd-home-metrics">'
+                f'<div><dt>Total revenue</dt><dd>{metrics["total_revenue"]:,.2f}</dd></div>'
+                f'<div><dt>Transactions</dt><dd>{metrics["number_of_transactions"]:,}</dd></div>'
+                f'<div><dt>Customers</dt><dd>{metrics["number_of_customers"]:,}</dd></div>'
+                '</dl></div>',
+                unsafe_allow_html=True,
+            )
+            monthly = monthly_revenue(sales, start, end)
+            line = monthly_line(monthly, "revenue", "Revenue").encode(
+                x=alt.X("sale_date:T", title=None, axis=alt.Axis(format="%b %y", tickCount=4)),
+                y=alt.Y("revenue:Q", title="Monthly revenue", axis=alt.Axis(format="~s", tickCount=4)),
+            )
+            area = line.mark_area(color=TEAL, opacity=.09)
+            show_chart(area + line, height=174)
 
 
 def show_ranking(data, field, label, title, color):
@@ -611,27 +753,25 @@ def show_anomalies(data, start_date, end_date):
 
 def main():
     apply_style()
-    hero()
 
-    demo_button, upload_button = st.columns(2)
-    if demo_button.button("Explore demo", type="primary", width="stretch"):
-        st.session_state["data_mode"] = "demo"
-    if upload_button.button("Use my data", width="stretch"):
-        st.session_state["data_mode"] = "upload"
+    folder = Path(__file__).resolve().parent
+    demo_csv = folder / "clean_financial_data.csv"
+    if not demo_csv.is_file():
+        demo_csv = folder.parent / "clean_financial_data.csv"
     mode = st.session_state.get("data_mode")
     if mode is None:
+        show_home(demo_csv)
         return
 
+    hero()
+    source_actions()
     is_demo = mode == "demo"
     source_label = "Demo ERP data" if is_demo else "Uploaded sales CSV"
     source_key = mode
     with st.sidebar:
         sidebar_brand()
     if is_demo:
-        folder = Path(__file__).resolve().parent
-        data_source = folder / "clean_financial_data.csv"
-        if not data_source.is_file():
-            data_source = folder.parent / "clean_financial_data.csv"
+        data_source = demo_csv
     else:
         data_source = st.file_uploader("Upload your sales CSV", type=["csv"])
         st.download_button(
