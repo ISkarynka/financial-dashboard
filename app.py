@@ -1,3 +1,4 @@
+from hashlib import sha256
 from html import escape
 from pathlib import Path
 from inspect import signature
@@ -9,6 +10,7 @@ import streamlit as st
 from financial_copilot import FinancialCopilot, render_chat_panel
 
 from data_processing import (
+    REQUIRED_COLUMNS,
     anomaly_trend,
     calculate_metrics,
     calculate_var,
@@ -611,22 +613,46 @@ def main():
     apply_style()
     hero()
 
+    demo_button, upload_button = st.columns(2)
+    if demo_button.button("Explore demo", type="primary", width="stretch"):
+        st.session_state["data_mode"] = "demo"
+    if upload_button.button("Use my data", width="stretch"):
+        st.session_state["data_mode"] = "upload"
+    mode = st.session_state.get("data_mode")
+    if mode is None:
+        return
+
+    is_demo = mode == "demo"
+    source_label = "Demo ERP data" if is_demo else "Uploaded sales CSV"
+    source_key = mode
     with st.sidebar:
         sidebar_brand()
-        uploaded_file = st.file_uploader("Upload your sales CSV (optional)", type=["csv"])
+    if is_demo:
+        folder = Path(__file__).resolve().parent
+        data_source = folder / "clean_financial_data.csv"
+        if not data_source.is_file():
+            data_source = folder.parent / "clean_financial_data.csv"
+    else:
+        data_source = st.file_uploader("Upload your sales CSV", type=["csv"])
+        st.download_button(
+            "Download CSV template",
+            data=",".join(REQUIRED_COLUMNS) + "\nS001,2025-01-01,120,C001,P001,Desk,Office\n",
+            file_name="sales_template.csv",
+            mime="text/csv",
+            on_click="ignore",
+        )
+        if data_source is not None:
+            source_key = f"{mode}:{data_source.name}:{sha256(data_source.getbuffer()).hexdigest()}"
 
-    # Week 10: run immediately with the project's cleaned ERP dataset.
-    # An uploaded file still overrides the default, preserving the existing workflow.
-    # Standalone Week 10–11 folder, with a fallback for the original dashboard layout.
-    folder = Path(__file__).resolve().parent
-    default_csv = folder / "clean_financial_data.csv"
-    if not default_csv.is_file():
-        default_csv = folder.parent / "clean_financial_data.csv"
-    data_source = uploaded_file if uploaded_file is not None else default_csv
-    if uploaded_file is None and not default_csv.exists():
-        with panel("upload_hint"):
-            st.subheader("Upload sales data to get started")
-            st.write("Upload your cleaned sales CSV using the sidebar.")
+    if st.session_state.get("active_data_source") != source_key:
+        st.session_state["active_data_source"] = source_key
+        for key in ("copilot_messages", "copilot_use_llm", "copilot_api_key"):
+            st.session_state.pop(key, None)
+
+    if data_source is None:
+        return
+    if is_demo and not data_source.is_file():
+        st.error("The demo sales CSV is unavailable. You can upload your own sales CSV.")
         return
 
     try:
@@ -644,7 +670,7 @@ def main():
     with st.sidebar:
         st.caption(f"{len(all_data):,} valid transactions loaded")
         st.subheader("Reporting period")
-        date_key = f"{first_date}_{last_date}"
+        date_key = f"{source_key}:{first_date}:{last_date}"
         start_date = st.date_input(
             "Start date", first_date, min_value=first_date, max_value=last_date,
             key=f"start_{date_key}",
@@ -666,17 +692,18 @@ def main():
     st.markdown(
         '<div class="fd-period"><strong>'
         f'{start_date:%d %b %Y} – {end_date:%d %b %Y}'
-        f'</strong><span>{len(data):,} transactions in view</span>'
+        f'</strong><span>{source_label}</span><span>{len(data):,} transactions in view</span>'
         '<span>Amounts shown in the CSV currency</span></div>',
         unsafe_allow_html=True,
     )
 
     monthly = monthly_revenue(data, start_date, end_date)
     growth = monthly_growth(data, start_date, end_date)
-    business, risk, predictions, anomalies, assistant = st.tabs([
-        "Business Performance", "Risk Analytics", "Predictive Analytics",
-        "Anomaly Detection", "AI Financial Copilot",
-    ])
+    business, risk, predictions, anomalies, assistant = st.tabs(
+        ["Business Performance", "Risk Analytics", "Predictive Analytics",
+         "Anomaly Detection", "AI Financial Copilot"],
+        default="AI Financial Copilot" if is_demo else "Business Performance",
+    )
 
     with business:
         show_business(data, monthly, growth)
@@ -687,12 +714,11 @@ def main():
     with anomalies:
         show_anomalies(data, start_date, end_date)
     with assistant:
-        # Match the dashboard's active CSV and reporting period in the copilot.
         try:
-            with FinancialCopilot(sales_data=all_data) as copilot:
+            with FinancialCopilot(sales_data=all_data, use_demo_erp=is_demo) as copilot:
                 render_chat_panel(copilot, start_date=start_date, end_date=end_date)
         except (FileNotFoundError, ValueError) as error:
-            st.error(f"Financial Copilot could not load ERP data: {error}")
+            st.error(f"Financial Copilot could not load data: {error}")
 
 
 if __name__ == "__main__":

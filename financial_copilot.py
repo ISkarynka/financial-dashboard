@@ -3,9 +3,8 @@
 Run separately: streamlit run financial_copilot.py
 Or import ``render_chat_panel`` into the existing Streamlit dashboard.
 
-The default mode is deterministic NL-to-SQL and local analytics: no API key or
-network access is required. The optional LLM fallback converts unsupported
-questions to *read-only* SQL, which is independently authorized by SQLite.
+The default mode uses local analytics. Optional OpenAI mode explains financial
+summaries and plans additional SQL queries for the read-only SQLite executor.
 """
 
 from __future__ import annotations
@@ -22,30 +21,34 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from data_processing import REQUIRED_COLUMNS
+
 
 MAX_ROWS = 500
-SQL_GENERATION_PROMPT = """You are a financial ERP analytics SQL planner.
+SALES_SQL_GENERATION_PROMPT = """You are a financial analytics SQL planner.
 Generate ONE SQLite SELECT statement using ONLY the schema listed below.
 Return strictly JSON: {"sql":"SELECT ...", "explanation":"..."}.
 Never run commands or access external resources. Never invent columns, tables,
 financial values, dates, data provenance, or causal explanations.
+Sales revenue is SUM(sales_clean.revenue), excluding flagged invalid sales.
+Use ISO dates and the historical snapshot. Prefer aggregates and limit listings to 50 rows.
 Schema:
   sales_clean(sale_id, invoice_id, sale_date, customer_id, product_id,
               product_name, category, revenue, discount_rate)
+"""
+SQL_GENERATION_PROMPT = SALES_SQL_GENERATION_PROMPT + """\
   customers(customer_id, first_name, last_name, city, country, signup_date)
   invoices(invoice_id, customer_id, invoice_date, due_date, subtotal,
            tax_amount, invoice_value)
   payments(payment_id, invoice_id, payment_date, payment_method, amount_paid)
   products(product_id, product_name, category, unit_cost, unit_price, stock_quantity)
 Conventions:
-  Sales revenue is SUM(sales_clean.revenue), excluding flagged invalid sales.
   For unpaid invoices, first aggregate payments BY invoice_id, then compare
   against invoices.invoice_value, using a tolerance of 0.01.
   Joining sales and payments directly may multiply rows: avoid this.
   Monetary currency is not specified in this dataset.
   For dates use YYYY-MM-DD; no CURRENT_DATE (historical snapshot).
   Do not select email or other private data; use customer IDs and names.
-  Prefer aggregate answers; use LIMIT 50 for detail listings.
   Do not explain away anomalies or describe them as proven fraud.
 """
 
@@ -84,13 +87,11 @@ def find_project_root(explicit_root: str | Path | None = None) -> Path:
 def _normalize_sales(source: Path | pd.DataFrame) -> pd.DataFrame:
     """Apply the dashboard's established validity rules to sales transactions."""
     data = pd.read_csv(source) if isinstance(source, Path) else source.copy()
-    required = {
-        "sale_id", "invoice_id", "product_id", "sale_date", "customer_id",
-        "product_name", "category", "revenue",
-    }
-    missing = required - set(data.columns)
+    missing = set(REQUIRED_COLUMNS) - set(data.columns)
     if missing:
         raise ValueError(f"Missing required cleaned-sales columns: {sorted(missing)}")
+    if "invoice_id" not in data.columns:
+        data["invoice_id"] = pd.NA
     for col in ["sale_id", "invoice_id", "product_id", "customer_id", "product_name", "category"]:
         data[col] = data[col].astype("string").str.strip().replace("", pd.NA)
     data["sale_date"] = pd.to_datetime(data["sale_date"], errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
@@ -130,6 +131,47 @@ def _money(value: Any) -> str:
     return f"{float(value):,.2f}"
 
 
+def _openai_completion(messages, api_key, model, *, json_mode=False):
+    try:
+        from openai import OpenAI, OpenAIError
+    except ImportError as exc:
+        raise RuntimeError("OpenAI mode requires the openai package.") from exc
+    api_key = api_key or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Enter an OpenAI API key or set OPENAI_API_KEY.")
+    options = {"response_format": {"type": "json_object"}} if json_mode else {}
+    try:
+        with OpenAI(api_key=api_key, timeout=20, max_retries=0) as client:
+            response = client.chat.completions.create(
+                model=model, temperature=0, messages=messages, **options,
+            )
+    except OpenAIError as exc:
+        raise RuntimeError("OpenAI could not complete this request. Try again.") from exc
+    text = response.choices[0].message.content if response.choices else None
+    if not text or not text.strip():
+        raise RuntimeError("OpenAI returned an empty response.")
+    return text.strip()
+
+
+def _financial_summary_messages(question, evidence):
+    try:
+        document = Path(__file__).with_name("prompts.md").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError("The financial summary template in prompts.md is unavailable.") from exc
+    prompts = []
+    for heading in ("Shared system prompt", "1. Financial summary"):
+        match = re.search(rf"^## {re.escape(heading)}\n\n```text\n(.*?)\n```", document, re.M | re.S)
+        if not match:
+            raise RuntimeError("The financial summary template in prompts.md is incomplete.")
+        prompts.append(match[1])
+    system, template = prompts
+    content = template.replace("{{evidence_json}}", json.dumps(evidence, ensure_ascii=False))
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": content.replace("{{question}}", question)},
+    ]
+
+
 class FinancialCopilot:
     """Use SQLite for ERP retrieval, Pandas for forecasting and anomaly analysis."""
 
@@ -137,32 +179,48 @@ class FinancialCopilot:
         self,
         project_root: str | Path | None = None,
         sales_data: pd.DataFrame | None = None,
+        *,
+        use_demo_erp: bool = True,
     ) -> None:
-        self.root = find_project_root(project_root)
-        # Prefer standalone Week 10–11 files, and keep legacy Lab 1 compatibility.
-        database = self.root / "financial_analytics.db"
-        if not database.is_file():
-            database = self.root / "week1-2" / "financial_analytics.db"
-        self.sales_source = self.root / "clean_financial_data.csv"
-        if not self.sales_source.is_file():
-            self.sales_source = self.root / "week3-4" / "clean_financial_data.csv"
-        if sales_data is None and not self.sales_source.exists():
-            raise FileNotFoundError(f"Cleaned sales file not found: {self.sales_source}")
-        self.sales = _normalize_sales(sales_data if sales_data is not None else self.sales_source)
+        self.use_demo_erp = use_demo_erp
+        self.root = None
+        self.sales_source = None
+        self.snapshot_date = None
+        database = None
+        if use_demo_erp:
+            self.root = find_project_root(project_root)
+            database = self.root / "financial_analytics.db"
+            if not database.is_file():
+                database = self.root / "week1-2" / "financial_analytics.db"
+            self.sales_source = self.root / "clean_financial_data.csv"
+            if not self.sales_source.is_file():
+                self.sales_source = self.root / "week3-4" / "clean_financial_data.csv"
+            if sales_data is None:
+                if not self.sales_source.is_file():
+                    raise FileNotFoundError(f"Cleaned sales file not found: {self.sales_source}")
+                sales_data = self.sales_source
+        if sales_data is None:
+            raise ValueError("Upload a sales CSV to use the copilot in this mode.")
+
+        self.sales = _normalize_sales(sales_data)
         self.connection = sqlite3.connect(":memory:", check_same_thread=False)
-        # Copy existing ERP data to an in-memory database: original source is never modified.
-        source = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
         try:
-            source.backup(self.connection)
-        finally:
-            source.close()
-        staging = self.sales.copy()
-        staging["sale_date"] = staging["sale_date"].dt.strftime("%Y-%m-%d")
-        staging.to_sql("sales_clean", self.connection, index=False, if_exists="replace")
-        self.connection.execute("CREATE INDEX IF NOT EXISTS idx_clean_date ON sales_clean(sale_date)")
-        self.connection.execute("CREATE INDEX IF NOT EXISTS idx_clean_customer ON sales_clean(customer_id)")
-        latest_payment = pd.read_sql_query("SELECT MAX(payment_date) AS d FROM payments", self.connection)["d"].iloc[0]
-        self.snapshot_date = str(latest_payment)
+            if database is not None:
+                source = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+                try:
+                    source.backup(self.connection)
+                finally:
+                    source.close()
+                latest_payment = self.connection.execute("SELECT MAX(payment_date) FROM payments").fetchone()[0]
+                self.snapshot_date = str(latest_payment) if latest_payment is not None else None
+            staging = self.sales.copy()
+            staging["sale_date"] = staging["sale_date"].dt.strftime("%Y-%m-%d")
+            staging.to_sql("sales_clean", self.connection, index=False, if_exists="replace")
+            self.connection.execute("CREATE INDEX IF NOT EXISTS idx_clean_date ON sales_clean(sale_date)")
+            self.connection.execute("CREATE INDEX IF NOT EXISTS idx_clean_customer ON sales_clean(customer_id)")
+        except Exception:
+            self.connection.close()
+            raise
         self.last_sales_date = self.sales["sale_date"].max().date() if not self.sales.empty else None
 
     def close(self) -> None:
@@ -184,7 +242,9 @@ class FinancialCopilot:
             raise ValueError("Only a single read-only SELECT query is allowed.")
         if re.search(r"(?i)\b(ATTACH|DETACH|PRAGMA|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|VACUUM|REINDEX|LOAD_EXTENSION)\b", statement):
             raise ValueError("Unsafe SQL keyword rejected.")
-        allowed_tables = {"sales_clean", "customers", "invoices", "payments", "products"}
+        allowed_tables = {"sales_clean"}
+        if self.use_demo_erp:
+            allowed_tables.update(("customers", "invoices", "payments", "products"))
         allowed_functions = {
             "sum", "count", "min", "max", "avg", "round", "coalesce", "nullif",
             "abs", "substr", "strftime", "date", "julianday", "trim", "length",
@@ -241,7 +301,12 @@ class FinancialCopilot:
         nmatch = re.search(r"\b(?:top|first|первых|топ)\s*(\d{1,2})\b", q)
         limit = min(int(nmatch.group(1)), 50) if nmatch else 5
 
+        if not self.use_demo_erp and re.search(r"\bpayments?\b|платеж|платёж|оплат", q):
+            return QueryPlan("invoice_data_required", "")
+
         if re.search(r"\b(fraud|suspicious|fraudulent)\b|мошенн|подозр", q):
+            if not self.use_demo_erp:
+                return QueryPlan("invoice_data_required", "")
             return QueryPlan("fraud_review", """
                 WITH payment_flags AS (
                   SELECT invoice_id,
@@ -283,6 +348,8 @@ class FinancialCopilot:
                 """ + sale_where + " GROUP BY substr(s.sale_date,1,7) ORDER BY month", params)
 
         if re.search(r"unpaid|outstanding|overdue|receivable|неоплач|просроч|задолж|долги|должник|invoice|счет[аов]?", q):
+            if not self.use_demo_erp:
+                return QueryPlan("invoice_data_required", "")
             invoice_id = re.search(r"\bINV\d{5}\b", question, re.I)
             customer_id = re.search(r"\bC\d{4}\b", question, re.I)
             if invoice_id:
@@ -312,6 +379,8 @@ class FinancialCopilot:
                 """ + invoice_where + extra + " ORDER BY outstanding DESC, i.due_date ASC", params)
 
         if re.search(r"\b(country|countries|странам|страны|страна)\b", q) and re.search(r"revenue|sales|выручк|продаж|top|highest|больш", q):
+            if not self.use_demo_erp:
+                return QueryPlan("country_data_required", "")
             return QueryPlan("by_country", """
                 SELECT COALESCE(c.country,'Unknown') AS country,
                        ROUND(SUM(s.revenue),2) AS revenue
@@ -335,16 +404,24 @@ class FinancialCopilot:
                 limit = 1
             if re.search(r"highest|most|maximum|biggest|largest|больш|максим|перв", q):
                 limit = 1 if not nmatch else limit
-            return QueryPlan("top_customers", """
+            ranking = """
                 SELECT s.customer_id,
-                       TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) AS customer_name,
                        ROUND(SUM(s.revenue),2) AS revenue,
                        COUNT(DISTINCT s.sale_id) AS transactions
-                FROM sales_clean s LEFT JOIN customers c ON c.customer_id=s.customer_id
+                FROM sales_clean s
                 """ + sale_where + " AND s.customer_id IS NOT NULL " + extra_filter + """
-                GROUP BY s.customer_id,c.first_name,c.last_name
-                ORDER BY revenue DESC LIMIT :result_limit
-                """, {**params, "result_limit": limit})
+                GROUP BY s.customer_id
+                ORDER BY revenue DESC, s.customer_id LIMIT :result_limit
+                """
+            if self.use_demo_erp:
+                ranking = "WITH ranked AS (" + ranking + """
+                ) SELECT r.customer_id,
+                         TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')) AS customer_name,
+                         r.revenue, r.transactions
+                  FROM ranked r LEFT JOIN customers c ON c.customer_id = r.customer_id
+                  ORDER BY r.revenue DESC, r.customer_id
+                """
+            return QueryPlan("top_customers", ranking, {**params, "result_limit": limit})
 
         if re.search(r"monthly|by month|month-by-month|по месяц|помесячн|динамик", q) and re.search(r"revenue|sales|выручк|продаж", q):
             return QueryPlan("monthly_revenue", """
@@ -365,25 +442,13 @@ class FinancialCopilot:
         return QueryPlan("unknown", "")
 
     def _llm_sql(self, question: str, key: str | None, model: str) -> str:
-        try:
-            from openai import OpenAI
-        except ImportError as exc:
-            raise RuntimeError("The optional LLM mode requires: pip install openai") from exc
-        api_key = key or os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("Set OPENAI_API_KEY or enter an API key to enable LLM SQL planning.")
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SQL_GENERATION_PROMPT},
-                {"role": "user", "content": question},
-            ],
-        )
-        raw = response.choices[0].message.content or "{}"
-        sql = json.loads(raw).get("sql", "")
+        prompt = SQL_GENERATION_PROMPT if self.use_demo_erp else SALES_SQL_GENERATION_PROMPT
+        raw = _openai_completion([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": question},
+        ], key, model, json_mode=True)
+        parsed = json.loads(raw)
+        sql = parsed.get("sql") if isinstance(parsed, dict) else None
         if not isinstance(sql, str):
             raise ValueError("Model did not return a SQL string.")
         return sql
@@ -397,11 +462,19 @@ class FinancialCopilot:
         if not question.strip():
             return CopilotAnswer("help", "Please enter a financial question.")
         plan = self.plan_query(question, start_date, end_date)
+        if plan.intent == "invoice_data_required":
+            return CopilotAnswer(plan.intent, "This question requires invoice and payment records. "
+                "Use Explore demo to try it with the sample ERP records.")
+        if plan.intent == "country_data_required":
+            return CopilotAnswer(plan.intent, "A country breakdown requires customer country records. "
+                "You can rank customers from this CSV by customer ID.")
         if plan.intent == "unknown":
             if not use_llm:
-                return CopilotAnswer("help", "I can answer questions about top customers, unpaid invoices, "
-                    "monthly revenue, a revenue forecast, financial KPIs, anomalies, and fraud-risk flags. "
-                    "Enable optional AI SQL planning for additional queries.")
+                topics = "top customers, monthly revenue, forecasts, financial KPIs and anomalies"
+                if self.use_demo_erp:
+                    topics += ", plus unpaid invoices and fraud-risk flags"
+                return CopilotAnswer("help", f"I can answer questions about {topics}. "
+                    "Enable optional OpenAI mode for additional SQL questions.")
             sql = self._llm_sql(question, api_key, model)
             table = self.execute_readonly(sql)
             if table.empty:
@@ -489,10 +562,11 @@ class FinancialCopilot:
                 msg = "No customers with valid sales match the selected period."
             elif len(table) == 1:
                 top = table.iloc[0]
-                name = top["customer_name"] or "Name unavailable"
+                name = top.get("customer_name")
+                customer = f"{name} ({top['customer_id']})" if name else top["customer_id"]
                 descriptor = ("Revenue for customer" if "customer_id" in plan.params
                               else "Highest-revenue customer")
-                msg = (f"{descriptor}: {name} ({top['customer_id']}), "
+                msg = (f"{descriptor}: {customer}, "
                     f"with {_money(top['revenue'])} in valid sales revenue across "
                     f"{int(top['transactions'])} transactions.")
             else:
@@ -514,12 +588,33 @@ class FinancialCopilot:
             return CopilotAnswer(plan.intent, msg, plan.sql, table)
         if plan.intent == "summary":
             row = table.iloc[0]
-            msg = (f"Total valid sales revenue: {_money(row['total_revenue'] or 0)}; "
-                f"transactions: {int(row['transactions'] or 0)}; "
-                f"customers: {int(row['customers'] or 0)}; "
-                f"average sales transaction: {_money(row['average_transaction'] or 0)}. "
-                "Amounts are in unspecified source currency and exclude invalid sales.")
-            return CopilotAnswer(plan.intent, msg, plan.sql, table)
+            if not row["transactions"]:
+                return CopilotAnswer(plan.intent, "No valid sales match the selected period.", plan.sql, table)
+            first = plan.params["start_date"] or _date_value(self.sales.sale_date.min())
+            last = plan.params["end_date"] or _date_value(self.last_sales_date)
+            source = "demo ERP" if self.use_demo_erp else "uploaded sales CSV"
+            evidence = {
+                "source": f"sales_clean ({source})",
+                "period": f"{first} to {last}",
+                "total_revenue": float(row["total_revenue"]),
+                "transactions": int(row["transactions"]),
+                "customers": int(row["customers"]),
+                "average_transaction_value": float(row["average_transaction"]),
+                "currency": None,
+            }
+            summary = CopilotAnswer(plan.intent,
+                f"Total valid sales revenue: {_money(evidence['total_revenue'])}; "
+                f"transactions: {evidence['transactions']}; customers: {evidence['customers']}; "
+                f"average sales transaction: {_money(evidence['average_transaction_value'])}. "
+                "Amounts are in unspecified source currency and exclude invalid sales.", plan.sql, table)
+            if use_llm:
+                try:
+                    messages = _financial_summary_messages(question, evidence)
+                    summary.answer = _openai_completion(messages, api_key, model)
+                    summary.details["note"] = "OpenAI summary based on the displayed KPI totals."
+                except RuntimeError as exc:
+                    summary.details["note"] = f"{exc} Showing the local KPI summary."
+            return summary
         if plan.intent == "monthly_revenue":
             msg = f"Monthly valid-sales revenue across {len(table)} months."
             return CopilotAnswer(plan.intent, msg, plan.sql, table)
@@ -557,39 +652,43 @@ def render_chat_panel(
     import streamlit as st
 
     st.header("AI Financial Copilot")
-    st.caption("Ask about ERP customers, unpaid invoices, KPIs, forecasts and anomalies. "
-        "Default mode runs locally; an optional LLM can plan additional SELECT queries.")
-    if start_date is not None and end_date is not None:
-        st.caption(f"Report period: {start_date} to {end_date}. "
-            "Sales queries and invoice listings follow these date filters.")
     if copilot is None:
         try:
             copilot = FinancialCopilot()
         except (FileNotFoundError, ValueError) as exc:
             st.error(str(exc))
             return
+    if copilot.use_demo_erp:
+        st.caption("Demo ERP data · Ask about customers, unpaid invoices, KPIs, forecasts and anomalies.")
+    else:
+        st.caption("Uploaded sales CSV · Ask about customer IDs, KPIs, forecasts and anomalies. "
+            "Invoice questions require invoice and payment records.")
+    if start_date is not None and end_date is not None:
+        st.caption(f"Report period: {start_date} to {end_date}.")
 
     with st.expander("Optional AI mode & data provenance"):
-        use_llm = st.checkbox("Use OpenAI to plan unsupported SQL questions", key="copilot_use_llm", value=False)
+        use_llm = st.checkbox("Use OpenAI for financial summaries and extra SQL questions", key="copilot_use_llm")
         key = st.text_input("OpenAI API key (optional; also accepts OPENAI_API_KEY)",
             type="password", key="copilot_api_key") if use_llm else None
-        st.caption("Sales: cleaned Week 3–4 CSV (same exclusions as the dashboard). "
-            "Invoices, customers and payments: Week 1–2 SQLite DB. "
-            f"Latest recorded payment: {copilot.snapshot_date}. "
-            "Financial currency is not documented in the data.")
-        st.caption("Only read-only SELECT SQL is allowed; raw model text never changes ERP data.")
+        st.caption("OpenAI receives your question and the aggregate KPIs for a financial summary. "
+            "SQL planning uses your question and the table schema.")
+        if copilot.use_demo_erp:
+            st.caption("Sales: bundled CSV. Invoices, customers and payments: bundled SQLite database. "
+                f"Latest recorded payment: {copilot.snapshot_date}.")
 
     examples = [
         "Which customer generated the highest revenue?",
-        "Show unpaid invoices.",
         "Forecast next month's revenue.",
         "Explain anomalies.",
+        "Give me a financial KPI summary",
     ]
-    st.markdown("**Try a question:**")
+    if copilot.use_demo_erp:
+        examples.insert(1, "Show unpaid invoices.")
+    st.markdown("**Try a question**")
     columns = st.columns(2)
     clicked = None
     for i, example in enumerate(examples):
-        if columns[i % 2].button(example, key=f"copilot_example_{i}", use_container_width=True):
+        if columns[i % 2].button(example, key=f"copilot_example_{i}", width="stretch"):
             clicked = example
 
     if "copilot_messages" not in st.session_state:
@@ -598,8 +697,10 @@ def render_chat_panel(
         with st.chat_message(item["role"]):
             st.markdown(item["text"])
             if item["role"] == "assistant":
+                if item.get("note"):
+                    st.caption(item["note"])
                 if item.get("table") is not None and not item["table"].empty:
-                    st.dataframe(item["table"].head(50), use_container_width=True, hide_index=True)
+                    st.dataframe(item["table"].head(50), width="stretch", hide_index=True)
                 if item.get("sql"):
                     with st.expander("View generated SQL"):
                         st.code(item["sql"], language="sql")
@@ -613,7 +714,7 @@ def render_chat_panel(
                 use_llm=use_llm, api_key=key)
             st.session_state["copilot_messages"].append({
                 "role": "assistant", "text": response.answer, "sql": response.sql,
-                "table": response.data,
+                "table": response.data, "note": response.details.get("note"),
             })
         except (ValueError, RuntimeError, sqlite3.Error) as exc:
             st.session_state["copilot_messages"].append({
