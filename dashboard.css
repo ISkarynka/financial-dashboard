@@ -193,6 +193,40 @@ div[class*="st-key-panel_"] {
 }
 .st-key-copilot_page [data-testid="stChatMessage"] { border-radius: 14px; }
 
+@media (prefers-reduced-motion: no-preference) {
+    /* Vega names these SVG groups after their layers. Axes and legends sit outside them. */
+    [data-testid="stVegaLiteChart"] :where(.mark-rect.role-mark) {
+        transform-box: fill-box;
+        transform-origin: center bottom;
+        animation: fd-bar-grow-y .62s cubic-bezier(.18, .75, .25, 1);
+    }
+    [data-testid="stVegaLiteChart"] .fd_growth_down_marks {
+        transform-origin: center top;
+    }
+    [data-testid="stVegaLiteChart"] .fd_ranking_marks {
+        transform-origin: left center;
+        animation-name: fd-bar-grow-x;
+    }
+    [data-testid="stVegaLiteChart"] :is(.mark-area, .mark-line, .mark-symbol).role-mark {
+        animation: fd-trace-line .78s cubic-bezier(.3, .65, .32, 1);
+    }
+}
+
+@keyframes fd-bar-grow-y {
+    from { transform: scaleY(0); }
+    to { transform: scaleY(1); }
+}
+
+@keyframes fd-bar-grow-x {
+    from { transform: scaleX(0); }
+    to { transform: scaleX(1); }
+}
+
+@keyframes fd-trace-line {
+    from { clip-path: inset(-6px 100% -6px -6px) fill-box; }
+    to { clip-path: inset(-6px -6px -6px -6px) fill-box; }
+}
+
 @container (max-width: 630px) {
     .st-key-report_charts [data-testid="stHorizontalBlock"],
     .st-key-ranking_charts [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }

@@ -68,7 +68,7 @@ def panel(name):
 
 def show_chart(chart, height=255):
     chart = (
-        chart.properties(height=height)
+        chart.properties(height=height, usermeta={"embedOptions": {"renderer": "svg"}})
         .configure(background="transparent")
         .configure_view(stroke=None)
         .configure_axis(domain=False, gridOpacity=.58, labelFontSize=11, titlePadding=9, labelPadding=6)
@@ -119,6 +119,7 @@ def show_ranking(data, field, label, title, color):
         chart = (
             alt.Chart(ranking)
             .mark_bar(color=color, cornerRadiusEnd=4)
+            .properties(name="fd_ranking")
             .encode(
                 x=alt.X("revenue:Q", title="Revenue", axis=alt.Axis(tickCount=5, format="~s")),
                 y=alt.Y(f"{field}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=170)),
@@ -156,17 +157,21 @@ def show_overview(data, monthly, growth):
             if valid_growth.empty:
                 st.info("Select at least two complete months to see the change.")
             else:
-                chart = (
+                bars = (
                     alt.Chart(valid_growth)
-                    .mark_bar(cornerRadiusEnd=3)
                     .encode(
                         x=month_bar_axis(),
                         y=alt.Y("growth_pct:Q", title="Change (%)", axis=alt.Axis(tickCount=5)),
-                        color=alt.condition(alt.datum.growth_pct < 0, alt.value(RED), alt.value(TEAL)),
                         tooltip=[month_tooltip(), alt.Tooltip("growth_pct:Q", title="Change (%)", format="+,.1f")],
                     )
                 )
-                show_chart(chart, height=245)
+                positive = bars.transform_filter(alt.datum.growth_pct >= 0).mark_bar(color=TEAL, cornerRadiusEnd=3)
+                negative = (
+                    bars.transform_filter(alt.datum.growth_pct < 0)
+                    .mark_bar(color=RED, cornerRadiusEnd=3)
+                    .properties(name="fd_growth_down")
+                )
+                show_chart(positive + negative, height=245)
                 st.caption("Versus the prior full month.")
 
     with st.container(key="ranking_charts"):
