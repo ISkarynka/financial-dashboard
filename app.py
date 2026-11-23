@@ -7,7 +7,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from financial_copilot import FinancialCopilot, render_chat_panel
+from chat_ui import render_chat_panel
+from financial_copilot import FinancialCopilot
 
 from data_processing import (
     REQUIRED_COLUMNS,
@@ -268,6 +269,23 @@ def apply_style():
             font-weight: 710;
             letter-spacing: -.04em;
         }
+        [data-testid="stMainBlockContainer"]:has(.st-key-copilot_page) { max-width: 64rem; }
+        .st-key-copilot_page h1 { letter-spacing: -.035em; }
+        .st-key-copilot_page [data-testid="stChatMessage"] {
+            border-radius: 14px;
+        }
+        [data-testid="stMain"]:has(.st-key-copilot_page) [data-testid="stBottomBlockContainer"] {
+            max-width: 64rem;
+        }
+        .st-key-copilot_chat_list [data-testid="stButton"] button {
+            justify-content: flex-start;
+            text-align: left;
+        }
+        .st-key-copilot_chat_list button[data-testid="stBaseButton-primary"] {
+            color: #075b51;
+            background: #dff2ee;
+            border-color: #b9dcd5;
+        }
         @media (max-width: 820px) {
             div.st-key-dashboard_home [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
             div.st-key-dashboard_home [data-testid="stColumn"] { flex: 1 1 100%; min-width: 0; }
@@ -403,10 +421,11 @@ def select_data_mode(mode):
 
 def source_actions():
     with st.container(key="data_source_actions", horizontal=True, gap="small"):
-        st.button(
+        if st.button(
             "Explore demo", type="primary", icon=":material/arrow_forward:", icon_position="right",
-            on_click=select_data_mode, args=("demo",),
-        )
+        ):
+            select_data_mode("demo")
+            st.switch_page(COPILOT_PAGE)
         st.button("Use my data", icon=":material/upload_file:", on_click=select_data_mode, args=("upload",))
 
 
@@ -751,29 +770,79 @@ def show_anomalies(data, start_date, end_date):
         st.caption("Number of flagged transactions by month within the selected dates.")
 
 
-def main():
-    apply_style()
-
+def demo_csv_path():
     folder = Path(__file__).resolve().parent
-    demo_csv = folder / "clean_financial_data.csv"
-    if not demo_csv.is_file():
-        demo_csv = folder.parent / "clean_financial_data.csv"
+    path = folder / "clean_financial_data.csv"
+    return path if path.is_file() else folder.parent / path.name
+
+
+def save_upload():
+    uploaded_file = st.session_state.get("sales_file")
+    st.session_state.pop("uploaded_sales", None)
+    st.session_state.pop("sales_file_error", None)
+    if uploaded_file is None:
+        return
+    try:
+        data = load_data(uploaded_file)
+    except (ValueError, UnicodeError, pd.errors.ParserError) as error:
+        st.session_state["sales_file_error"] = f"Could not read the CSV: {error}"
+        return
+    if data.empty:
+        st.session_state["sales_file_error"] = "No valid transactions were found in the CSV."
+        return
+    source = f"csv:{sha256(uploaded_file.getbuffer()).hexdigest()}"
+    st.session_state["uploaded_sales"] = (data, source)
+
+
+def active_sales(is_demo):
+    if not is_demo:
+        return st.session_state.get("uploaded_sales")
+    try:
+        data = load_data(demo_csv_path())
+    except (OSError, ValueError):
+        st.error("The demo sales CSV is unavailable. You can upload your own sales CSV.")
+        return None
+    if data.empty:
+        st.warning("The demo CSV has no valid sales.")
+        return None
+    return data, "demo"
+
+
+def reporting_period(data, source, *, expanded=False):
+    first_date = data["sale_date"].min().date()
+    last_date = data["sale_date"].max().date()
+    saved_periods = st.session_state.setdefault("reporting_periods", {})
+    start, end = saved_periods.get(source, (first_date, last_date))
+    date_key = f"{source}:{first_date}:{last_date}"
+    with st.sidebar.expander("Reporting period", expanded=expanded):
+        start = st.date_input(
+            "Start date", max(first_date, min(start, last_date)),
+            min_value=first_date, max_value=last_date, key=f"start_{date_key}",
+        )
+        end = st.date_input(
+            "End date", max(first_date, min(end, last_date)),
+            min_value=first_date, max_value=last_date, key=f"end_{date_key}",
+        )
+    saved_periods[source] = start, end
+    if start > end:
+        st.warning("Start date must be on or before the end date.")
+        return None
+    return start, end
+
+
+def dashboard():
     mode = st.session_state.get("data_mode")
     if mode is None:
-        show_home(demo_csv)
+        show_home(demo_csv_path())
         return
 
     hero()
     source_actions()
-    is_demo = mode == "demo"
-    source_label = "Demo ERP data" if is_demo else "Uploaded sales CSV"
-    source_key = mode
     with st.sidebar:
         sidebar_brand()
-    if is_demo:
-        data_source = demo_csv
-    else:
-        data_source = st.file_uploader("Upload your sales CSV", type=["csv"])
+    is_demo = mode == "demo"
+    if not is_demo:
+        st.file_uploader("Upload your sales CSV", type=["csv"], key="sales_file", on_change=save_upload)
         st.download_button(
             "Download CSV template",
             data=",".join(REQUIRED_COLUMNS) + "\nS001,2025-01-01,120,C001,P001,Desk,Office\n",
@@ -781,54 +850,23 @@ def main():
             mime="text/csv",
             on_click="ignore",
         )
-        if data_source is not None:
-            source_key = f"{mode}:{data_source.name}:{sha256(data_source.getbuffer()).hexdigest()}"
+        if error := st.session_state.get("sales_file_error"):
+            st.error(error)
 
-    if st.session_state.get("active_data_source") != source_key:
-        st.session_state["active_data_source"] = source_key
-        for key in ("copilot_messages", "copilot_use_llm", "copilot_api_key"):
-            st.session_state.pop(key, None)
-
-    if data_source is None:
+    current = active_sales(is_demo)
+    if current is None:
         return
-    if is_demo and not data_source.is_file():
-        st.error("The demo sales CSV is unavailable. You can upload your own sales CSV.")
+    all_data, source = current
+    period = reporting_period(all_data, source, expanded=True)
+    if period is None:
         return
-
-    try:
-        all_data = load_data(data_source)
-    except (ValueError, UnicodeError, pd.errors.ParserError) as error:
-        st.error(f"Could not read the CSV: {error}")
-        return
-
-    if all_data.empty:
-        st.warning("No valid transactions were found in the CSV.")
-        return
-
-    first_date = all_data["sale_date"].min().date()
-    last_date = all_data["sale_date"].max().date()
-    with st.sidebar:
-        st.caption(f"{len(all_data):,} valid transactions loaded")
-        st.subheader("Reporting period")
-        date_key = f"{source_key}:{first_date}:{last_date}"
-        start_date = st.date_input(
-            "Start date", first_date, min_value=first_date, max_value=last_date,
-            key=f"start_{date_key}",
-        )
-        end_date = st.date_input(
-            "End date", last_date, min_value=first_date, max_value=last_date,
-            key=f"end_{date_key}",
-        )
-
-    if start_date > end_date:
-        st.warning("Start date must be on or before the end date.")
-        return
-
+    start_date, end_date = period
     data = all_data[all_data["sale_date"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))]
     if data.empty:
         st.info("No transactions in this period. Try a wider date range.")
         return
 
+    source_label = "Demo ERP data" if is_demo else "Uploaded sales CSV"
     st.markdown(
         '<div class="fd-period"><strong>'
         f'{start_date:%d %b %Y} – {end_date:%d %b %Y}'
@@ -839,12 +877,9 @@ def main():
 
     monthly = monthly_revenue(data, start_date, end_date)
     growth = monthly_growth(data, start_date, end_date)
-    business, risk, predictions, anomalies, assistant = st.tabs(
-        ["Business Performance", "Risk Analytics", "Predictive Analytics",
-         "Anomaly Detection", "AI Financial Copilot"],
-        default="AI Financial Copilot" if is_demo else "Business Performance",
-    )
-
+    business, risk, predictions, anomalies = st.tabs([
+        "Business Performance", "Risk Analytics", "Predictive Analytics", "Anomaly Detection",
+    ])
     with business:
         show_business(data, monthly, growth)
     with risk:
@@ -853,12 +888,38 @@ def main():
         show_predictions(growth)
     with anomalies:
         show_anomalies(data, start_date, end_date)
-    with assistant:
+
+
+def copilot_workspace():
+    is_demo = st.session_state.setdefault("data_mode", "demo") == "demo"
+    current = active_sales(is_demo)
+    if current is None:
+        st.title("AI Financial Copilot", anchor=False)
+        if not is_demo:
+            st.info("Upload a sales CSV on the Dashboard to start a chat with your data.")
+        return
+    data, source = current
+    period = reporting_period(data, source)
+    if period is None:
+        return
+    start, end = period
+    with st.container(key="copilot_page"):
         try:
-            with FinancialCopilot(sales_data=all_data, use_demo_erp=is_demo) as copilot:
-                render_chat_panel(copilot, start_date=start_date, end_date=end_date)
+            with FinancialCopilot(sales_data=data, use_demo_erp=is_demo) as copilot:
+                render_chat_panel(copilot, start_date=start, end_date=end, source=source)
         except (FileNotFoundError, ValueError) as error:
             st.error(f"Financial Copilot could not load data: {error}")
+
+
+COPILOT_PAGE = st.Page(copilot_workspace, title="AI Financial Copilot", url_path="copilot", icon=":material/insights:")
+
+
+def main():
+    apply_style()
+    st.navigation([
+        st.Page(dashboard, title="Dashboard", icon=":material/dashboard:", default=True),
+        COPILOT_PAGE,
+    ]).run()
 
 
 if __name__ == "__main__":

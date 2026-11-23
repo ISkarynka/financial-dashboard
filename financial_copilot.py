@@ -1,14 +1,12 @@
 """Financial Copilot for the Lab 1 ERP dashboard (Week 10).
 
-Run separately: streamlit run financial_copilot.py
-Or import ``render_chat_panel`` into the existing Streamlit dashboard.
-
-The default mode uses local analytics. Optional OpenAI mode explains financial
-summaries and plans additional SQL queries for the read-only SQLite executor.
+Use the bundled analytics locally, or enable model-based planning and
+explanations with a server-side OpenAI credential.
 """
 
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date
 import json
@@ -21,36 +19,28 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from data_processing import REQUIRED_COLUMNS
+from data_processing import REQUIRED_COLUMNS, calculate_var, monthly_growth
 
 
 MAX_ROWS = 500
-SALES_SQL_GENERATION_PROMPT = """You are a financial analytics SQL planner.
-Generate ONE SQLite SELECT statement using ONLY the schema listed below.
-Return strictly JSON: {"sql":"SELECT ...", "explanation":"..."}.
-Never run commands or access external resources. Never invent columns, tables,
-financial values, dates, data provenance, or causal explanations.
-Sales revenue is SUM(sales_clean.revenue), excluding flagged invalid sales.
-Use ISO dates and the historical snapshot. Prefer aggregates and limit listings to 50 rows.
-Schema:
-  sales_clean(sale_id, invoice_id, sale_date, customer_id, product_id,
+SALES_SCHEMA = """  sales_clean(sale_id, invoice_id, sale_date, customer_id, product_id,
               product_name, category, revenue, discount_rate)
 """
-SQL_GENERATION_PROMPT = SALES_SQL_GENERATION_PROMPT + """\
+ERP_SCHEMA = SALES_SCHEMA + """\
   customers(customer_id, first_name, last_name, city, country, signup_date)
   invoices(invoice_id, customer_id, invoice_date, due_date, subtotal,
            tax_amount, invoice_value)
   payments(payment_id, invoice_id, payment_date, payment_method, amount_paid)
   products(product_id, product_name, category, unit_cost, unit_price, stock_quantity)
-Conventions:
-  For unpaid invoices, first aggregate payments BY invoice_id, then compare
-  against invoices.invoice_value, using a tolerance of 0.01.
-  Joining sales and payments directly may multiply rows: avoid this.
-  Monetary currency is not specified in this dataset.
-  For dates use YYYY-MM-DD; no CURRENT_DATE (historical snapshot).
-  Do not select email or other private data; use customer IDs and names.
-  Do not explain away anomalies or describe them as proven fraud.
 """
+ANALYSIS_TOOLS = {
+    "summary": ("Give me a financial KPI summary", "1. Financial summary"),
+    "kpi": ("Explain average transaction value", "2. KPI explanation"),
+    "risk": ("Explain revenue risk", "3. Risk explanation"),
+    "fraud": ("Investigate fraud risk", "4. Fraud investigation"),
+    "forecast": ("Forecast next month's revenue", None),
+    "anomalies": ("Explain anomalies", None),
+}
 
 
 @dataclass
@@ -138,12 +128,12 @@ def _openai_completion(messages, api_key, model, *, json_mode=False):
         raise RuntimeError("OpenAI mode requires the openai package.") from exc
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("Enter an OpenAI API key or set OPENAI_API_KEY.")
+        raise RuntimeError("OpenAI is unavailable on the server.")
     options = {"response_format": {"type": "json_object"}} if json_mode else {}
     try:
         with OpenAI(api_key=api_key, timeout=20, max_retries=0) as client:
             response = client.chat.completions.create(
-                model=model, temperature=0, messages=messages, **options,
+                model=model, temperature=0, max_completion_tokens=700, messages=messages, **options,
             )
     except OpenAIError as exc:
         raise RuntimeError("OpenAI could not complete this request. Try again.") from exc
@@ -153,21 +143,21 @@ def _openai_completion(messages, api_key, model, *, json_mode=False):
     return text.strip()
 
 
-def _financial_summary_messages(question, evidence):
+def _prompt(heading):
     try:
         document = Path(__file__).with_name("prompts.md").read_text(encoding="utf-8")
     except OSError as exc:
-        raise RuntimeError("The financial summary template in prompts.md is unavailable.") from exc
-    prompts = []
-    for heading in ("Shared system prompt", "1. Financial summary"):
-        match = re.search(rf"^## {re.escape(heading)}\n\n```text\n(.*?)\n```", document, re.M | re.S)
-        if not match:
-            raise RuntimeError("The financial summary template in prompts.md is incomplete.")
-        prompts.append(match[1])
-    system, template = prompts
-    content = template.replace("{{evidence_json}}", json.dumps(evidence, ensure_ascii=False))
+        raise RuntimeError("The Copilot prompts are unavailable.") from exc
+    match = re.search(rf"^## {re.escape(heading)}\n\n```text\n(.*?)\n```", document, re.M | re.S)
+    if not match:
+        raise RuntimeError("The Copilot prompt is missing.")
+    return match[1]
+
+
+def _explanation_messages(heading, question, evidence):
+    content = _prompt(heading).replace("{{evidence_json}}", json.dumps(evidence, ensure_ascii=False))
     return [
-        {"role": "system", "content": system},
+        {"role": "system", "content": _prompt("Shared system prompt")},
         {"role": "user", "content": content.replace("{{question}}", question)},
     ]
 
@@ -232,7 +222,8 @@ class FinancialCopilot:
     def __exit__(self, *_: Any) -> None:
         self.close()
 
-    def execute_readonly(self, sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
+    def execute_readonly(self, sql: str, params: dict[str, Any] | None = None,
+                         *, connection: sqlite3.Connection | None = None) -> pd.DataFrame:
         """Enforce a SELECT-only, allowlisted SQLite query, including LLM output."""
         statement = sql.strip()
         if statement.endswith(";"):
@@ -271,20 +262,23 @@ class FinancialCopilot:
             progress_calls += 1
             return int(progress_calls > 1000)  # query CPU budget
 
-        self.connection.set_authorizer(authorize)
-        self.connection.set_progress_handler(progress, 1000)
+        db = connection if connection is not None else self.connection
+        db.set_authorizer(authorize)
+        db.set_progress_handler(progress, 1000)
         try:
-            cur = self.connection.execute(statement, params or {})
+            cur = db.execute(statement, params or {})
             rows = cur.fetchmany(MAX_ROWS + 1)
             columns = [c[0] for c in cur.description or []]
+            if len(columns) != len(set(columns)):
+                raise ValueError("Query result columns need distinct names.")
             result = pd.DataFrame(rows[:MAX_ROWS], columns=columns)
             result.attrs["truncated"] = len(rows) > MAX_ROWS
             return result
         except sqlite3.DatabaseError as exc:
             raise ValueError(f"SQL cannot be executed safely: {exc}") from exc
         finally:
-            self.connection.set_progress_handler(None, 0)
-            self.connection.set_authorizer(None)
+            db.set_progress_handler(None, 0)
+            db.set_authorizer(None)
 
     def plan_query(
         self, question: str, start_date: str | date | None = None,
@@ -339,6 +333,9 @@ class FinancialCopilot:
                        s.product_name,s.category,s.revenue
                 FROM sales_clean s
                 """ + sale_where + " ORDER BY s.sale_date DESC, s.sale_id", params)
+
+        if re.search(r"\brisk\b|\bvar\b|риск", q):
+            return QueryPlan("risk", "", params)
 
         if re.search(r"forecast|predict|projection|next month|прогноз|следующ.{0,8}месяц", q):
             return QueryPlan("forecast", """
@@ -430,8 +427,9 @@ class FinancialCopilot:
                 FROM sales_clean s
                 """ + sale_where + " GROUP BY substr(s.sale_date,1,7) ORDER BY month", params)
 
-        if re.search(r"summary|summari|kpi|overview|financial|сводк|итог|показател|финансов", q):
-            return QueryPlan("summary", """
+        explain_kpi = re.search(r"average transaction|average sale|средн.{0,15}(чек|транзакц|продаж)", q)
+        if explain_kpi or re.search(r"summary|summari|kpi|overview|financial|сводк|итог|показател|финансов", q):
+            return QueryPlan("kpi" if explain_kpi else "summary", """
                 SELECT ROUND(SUM(s.revenue),2) AS total_revenue,
                        COUNT(DISTINCT s.sale_id) AS transactions,
                        COUNT(DISTINCT s.customer_id) AS customers,
@@ -441,26 +439,119 @@ class FinancialCopilot:
 
         return QueryPlan("unknown", "")
 
-    def _llm_sql(self, question: str, key: str | None, model: str) -> str:
-        prompt = SQL_GENERATION_PROMPT if self.use_demo_erp else SALES_SQL_GENERATION_PROMPT
+    def _model_sql(self, sql, start, end):
+        # Give the model only the selected report, regardless of filters in its SQL.
+        with closing(sqlite3.connect(":memory:")) as scoped:
+            self.connection.backup(scoped)
+            params = {"start_date": start, "end_date": end}
+            sales_filter = _date_where("sale_date", start, end).removeprefix(" WHERE ")
+            scoped.execute(f"DELETE FROM sales_clean WHERE NOT COALESCE(({sales_filter}), 0)", params)
+            if self.use_demo_erp:
+                invoice_filter = _date_where("invoice_date", start, end).removeprefix(" WHERE ")
+                scoped.execute(f"DELETE FROM invoices WHERE NOT COALESCE(({invoice_filter}), 0)", params)
+                scoped.execute("DELETE FROM payments WHERE invoice_id NOT IN (SELECT invoice_id FROM invoices)")
+            data = self.execute_readonly(sql, connection=scoped)
+        if data.empty:
+            answer = "No records matched the query in the selected report."
+        elif data.shape == (1, 1):
+            answer = f"**{data.columns[0].replace('_', ' ')}** — {data.iloc[0, 0]}"
+        else:
+            answer = f"The query returned {len(data):,} rows. The table shows up to 50 rows."
+        if data.attrs.get("truncated"):
+            answer += f" Results reached the {MAX_ROWS}-row query limit."
+        return CopilotAnswer("custom_sql", answer, sql, data, {"note": "SQL planned by OpenAI."})
+
+    def _ask_model(self, question, start, end, history, api_key, model):
+        schema = ERP_SCHEMA if self.use_demo_erp else SALES_SCHEMA
+        prompt = _prompt("5. Question routing and SQL").replace("{{schema}}", schema)
+        context = {
+            "report_start": start, "report_end": end, "latest_payment": self.snapshot_date,
+            "recent_questions": list(history)[-4:], "question": question,
+        }
         raw = _openai_completion([
             {"role": "system", "content": prompt},
-            {"role": "user", "content": question},
-        ], key, model, json_mode=True)
-        parsed = json.loads(raw)
-        sql = parsed.get("sql") if isinstance(parsed, dict) else None
-        if not isinstance(sql, str):
-            raise ValueError("Model did not return a SQL string.")
-        return sql
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+        ], api_key, model, json_mode=True)
+        decision = json.loads(raw)
+        if not isinstance(decision, dict) or not isinstance(action := decision.get("action"), str):
+            raise ValueError("The model did not choose a data tool.")
+        if action == "sql":
+            sql = decision.get("sql")
+            if not isinstance(sql, str):
+                raise ValueError("The model did not return SQL.")
+            return self._model_sql(sql, start, end)
+        if action == "unsupported":
+            return self._ask_local(question, start, end)
+        if action not in ANALYSIS_TOOLS:
+            raise ValueError("The model chose an unavailable data tool.")
+        tool_question, heading = ANALYSIS_TOOLS[action]
+        result = self._ask_local(tool_question, start, end)
+        evidence = result.details.get("evidence")
+        if heading and evidence:
+            try:
+                result.answer = _openai_completion(
+                    _explanation_messages(heading, question, evidence), api_key, model,
+                )
+            except RuntimeError:
+                result.details["note"] = "Showing the calculated result. The model explanation was unavailable."
+                return result
+            result.details["note"] = "OpenAI explained the calculated evidence."
+        else:
+            result.details["note"] = "OpenAI selected the analysis. Calculations ran locally."
+        return result
 
     def ask(
         self, question: str, *, start_date: str | date | None = None,
         end_date: str | date | None = None, use_llm: bool = False,
-        api_key: str | None = None, model: str = "gpt-4.1-mini",
+        api_key: str | None = None, model: str = "gpt-4.1-mini", history=(),
     ) -> CopilotAnswer:
         """Answer ERP questions with traceable SQL and measured calculations."""
         if not question.strip():
             return CopilotAnswer("help", "Please enter a financial question.")
+        start, end = _date_value(start_date), _date_value(end_date)
+        if start and end and start > end:
+            raise ValueError("The start date must be before the end date.")
+        if use_llm:
+            try:
+                return self._ask_model(question, start, end, history, api_key, model)
+            except (ValueError, RuntimeError, sqlite3.Error):
+                result = self._ask_local(question, start, end)
+                result.details["note"] = "The model could not complete this request. Showing the local result."
+                return result
+        return self._ask_local(question, start, end)
+
+    def _explain_risk(self, start_date, end_date):
+        if self.sales.empty:
+            return CopilotAnswer("risk", "No valid sales are available for revenue risk analysis.")
+        start = pd.Timestamp(start_date) if start_date else self.sales.sale_date.min()
+        end = pd.Timestamp(end_date) if end_date else self.sales.sale_date.max()
+        sales = self.sales[self.sales.sale_date.between(start, end)]
+        growth = monthly_growth(sales, start, end)
+        risk = calculate_var(growth)
+        evidence = {
+            "source": "Monthly growth of valid sales revenue",
+            "period": f"{start:%Y-%m-%d} to {end:%Y-%m-%d}",
+            "growth_observations": int(growth["growth_pct"].count()),
+            "minimum_observations": 12,
+            "currency": None,
+        }
+        if risk is None:
+            return CopilotAnswer("risk", "Revenue VaR needs at least 12 monthly growth observations. "
+                f"This period has {evidence['growth_observations']}.", details={"evidence": evidence})
+        evidence.update({
+            "fifth_percentile_growth_pct": float(growth["growth_pct"].quantile(0.05)),
+            "var_pct": risk["var_pct"],
+            "baseline_month": risk["baseline_month"].strftime("%Y-%m"),
+            "baseline_revenue": risk["baseline_revenue"],
+            "estimated_shortfall": risk["shortfall"],
+        })
+        return CopilotAnswer("risk",
+            f"The historical 95% revenue VaR is {risk['var_pct']:.1f}%, or "
+            f"{_money(risk['shortfall'])} relative to {evidence['baseline_month']} revenue. "
+            f"It uses {risk['observations']} monthly growth observations. Future declines can exceed it.",
+            details={"evidence": evidence})
+
+    def _ask_local(self, question, start_date, end_date):
         plan = self.plan_query(question, start_date, end_date)
         if plan.intent == "invoice_data_required":
             return CopilotAnswer(plan.intent, "This question requires invoice and payment records. "
@@ -469,23 +560,13 @@ class FinancialCopilot:
             return CopilotAnswer(plan.intent, "A country breakdown requires customer country records. "
                 "You can rank customers from this CSV by customer ID.")
         if plan.intent == "unknown":
-            if not use_llm:
-                topics = "top customers, monthly revenue, forecasts, financial KPIs and anomalies"
-                if self.use_demo_erp:
-                    topics += ", plus unpaid invoices and fraud-risk flags"
-                return CopilotAnswer("help", f"I can answer questions about {topics}. "
-                    "Enable optional OpenAI mode for additional SQL questions.")
-            sql = self._llm_sql(question, api_key, model)
-            table = self.execute_readonly(sql)
-            if table.empty:
-                answer = "The read-only SQL query returned no matching records."
-            elif table.shape == (1, 1):
-                answer = f"SQL result — {table.columns[0]}: {table.iloc[0,0]:,}" if isinstance(table.iloc[0,0], (int,float)) else f"SQL result: {table.iloc[0,0]}"
-            else:
-                answer = f"The read-only query returned {len(table)} displayed rows. See the result table and SQL below."
-            if table.attrs.get("truncated"):
-                answer += f" Results are capped at {MAX_ROWS} rows."
-            return CopilotAnswer("custom_sql", answer, sql, table)
+            topics = "top customers, monthly revenue, forecasts, financial KPIs, revenue risk and anomalies"
+            if self.use_demo_erp:
+                topics += ", plus unpaid invoices and fraud-risk flags"
+            return CopilotAnswer("help", f"Try a question about {topics}.")
+
+        if plan.intent == "risk":
+            return self._explain_risk(start_date, end_date)
 
         if plan.intent == "anomalies":
             # IQR methodology is imported from the existing Week 6 dashboard.
@@ -496,10 +577,10 @@ class FinancialCopilot:
             if plan.params["end_date"]:
                 subset = subset[subset.sale_date <= pd.Timestamp(plan.params["end_date"])]
             if len(subset) < 20:
-                return CopilotAnswer("anomalies", "At least 20 transactions are needed for IQR anomaly detection.", plan.sql)
+                return CopilotAnswer("anomalies", "At least 20 transactions are needed for IQR anomaly detection.")
             flagged = detect_anomalies(subset)
             if flagged is None:
-                return CopilotAnswer("anomalies", "Insufficient transactions for anomaly detection.", plan.sql)
+                return CopilotAnswer("anomalies", "Insufficient transactions for anomaly detection.")
             display = flagged[["sale_date", "sale_id", "invoice_id", "customer_id", "product_name",
                 "category", "revenue", "threshold", "reason", "comparison"]].head(30).copy()
             if not display.empty:
@@ -515,8 +596,8 @@ class FinancialCopilot:
                 "category are flagged; small categories use all selected sales."
                 + example_text + " Potential explanations include order size, discounts, or data errors; "
                 "the data alone cannot establish the cause or fraud.")
-            return CopilotAnswer("anomalies", answer, plan.sql,
-                display, {"anomaly_count": len(flagged), "transaction_count": len(subset)})
+            return CopilotAnswer("anomalies", answer, data=display,
+                details={"anomaly_count": len(flagged), "transaction_count": len(subset)})
 
         if plan.intent == "forecast":
             from data_processing import revenue_forecast
@@ -586,7 +667,7 @@ class FinancialCopilot:
                     msg = (f"Showing only the first {MAX_ROWS} matches; displayed outstanding subtotal "
                         f"is {_money(outstanding.sum())}. Data snapshot through {self.snapshot_date}.")
             return CopilotAnswer(plan.intent, msg, plan.sql, table)
-        if plan.intent == "summary":
+        if plan.intent in ("summary", "kpi"):
             row = table.iloc[0]
             if not row["transactions"]:
                 return CopilotAnswer(plan.intent, "No valid sales match the selected period.", plan.sql, table)
@@ -598,23 +679,23 @@ class FinancialCopilot:
                 "period": f"{first} to {last}",
                 "total_revenue": float(row["total_revenue"]),
                 "transactions": int(row["transactions"]),
+                "distinct_sale_ids": int(row["transactions"]),
                 "customers": int(row["customers"]),
                 "average_transaction_value": float(row["average_transaction"]),
                 "currency": None,
             }
-            summary = CopilotAnswer(plan.intent,
+            if plan.intent == "kpi":
+                return CopilotAnswer(plan.intent,
+                    "Average transaction value is valid sales revenue divided by distinct sale IDs. "
+                    f"For this period, {_money(evidence['total_revenue'])} across "
+                    f"{evidence['transactions']:,} sales gives {_money(evidence['average_transaction_value'])} per sale.",
+                    plan.sql, table, {"evidence": evidence})
+            return CopilotAnswer(plan.intent,
                 f"Total valid sales revenue: {_money(evidence['total_revenue'])}; "
                 f"transactions: {evidence['transactions']}; customers: {evidence['customers']}; "
                 f"average sales transaction: {_money(evidence['average_transaction_value'])}. "
-                "Amounts are in unspecified source currency and exclude invalid sales.", plan.sql, table)
-            if use_llm:
-                try:
-                    messages = _financial_summary_messages(question, evidence)
-                    summary.answer = _openai_completion(messages, api_key, model)
-                    summary.details["note"] = "OpenAI summary based on the displayed KPI totals."
-                except RuntimeError as exc:
-                    summary.details["note"] = f"{exc} Showing the local KPI summary."
-            return summary
+                "Amounts are in unspecified source currency and exclude invalid sales.",
+                plan.sql, table, {"evidence": evidence})
         if plan.intent == "monthly_revenue":
             msg = f"Monthly valid-sales revenue across {len(table)} months."
             return CopilotAnswer(plan.intent, msg, plan.sql, table)
@@ -626,113 +707,52 @@ class FinancialCopilot:
             msg += f"Revenue breakdown across {len(table)} displayed groups, using cleaned sales."
             return CopilotAnswer(plan.intent, msg, plan.sql, table)
         if plan.intent == "fraud_review":
+            evidence = {
+                "source": "Demo ERP invoices, payments and valid sales",
+                "snapshot_date": self.snapshot_date,
+                "period": f"{start_date or _date_value(self.sales.sale_date.min())} to {end_date or _date_value(self.last_sales_date)}",
+                "currency": None,
+                "flagged_invoice_rows_returned": len(table),
+                "invoice_query_limit": 50,
+                "flags": json.loads(table.head(5).to_json(orient="records")),
+            }
             if not table.empty:
                 msg = (f"{len(table)} invoice(s) flagged by payment/discount review rules "
                     "(negative payments, discounts ≥40%, or overpayments). "
                     "These are leads for checking source documents, not proof of fraud.")
-                return CopilotAnswer(plan.intent, msg, plan.sql, table)
+                return CopilotAnswer(plan.intent, msg, plan.sql, table, {"evidence": evidence})
             # Supplement payment rules with the existing dashboard's independent
             # statistical outlier evidence, without asserting fraud.
-            anomaly = self.ask("Explain anomalies", start_date=start_date, end_date=end_date)
+            anomaly = self._ask_local("Explain anomalies", start_date, end_date)
+            evidence["sales_iqr_outliers"] = anomaly.details.get("anomaly_count")
             msg = ("No invoices matched the negative-payment, high-discount or overpayment rules. "
                 + f"Separately, statistical sales screening found {anomaly.details.get('anomaly_count', 0)} "
                 "IQR outliers; a sample is shown for manual review. "
                 "Statistical irregularity does not establish intent or fraud.")
             return CopilotAnswer(plan.intent, msg,
                 plan.sql + "\n\n-- IQR sales screening performed in Pandas (see Week 6 dashboard)",
-                anomaly.data, {"anomaly_count": anomaly.details.get("anomaly_count", 0)})
+                anomaly.data, {"evidence": evidence})
         return CopilotAnswer("help", "No handler for this question.")
 
 
-def render_chat_panel(
-    copilot: FinancialCopilot | None = None,
-    *, start_date: date | None = None, end_date: date | None = None,
-) -> None:
-    """Reusable Streamlit chat UI, suitable as a fifth dashboard tab."""
+def render_chat_panel(copilot=None, *, start_date=None, end_date=None):
+    """Open the conversation workspace when running the Copilot by itself."""
     import streamlit as st
-
-    st.header("AI Financial Copilot")
-    if copilot is None:
-        try:
-            copilot = FinancialCopilot()
-        except (FileNotFoundError, ValueError) as exc:
-            st.error(str(exc))
-            return
-    if copilot.use_demo_erp:
-        st.caption("Demo ERP data · Ask about customers, unpaid invoices, KPIs, forecasts and anomalies.")
-    else:
-        st.caption("Uploaded sales CSV · Ask about customer IDs, KPIs, forecasts and anomalies. "
-            "Invoice questions require invoice and payment records.")
-    if start_date is not None and end_date is not None:
-        st.caption(f"Report period: {start_date} to {end_date}.")
-
-    with st.expander("Optional AI mode & data provenance"):
-        use_llm = st.checkbox("Use OpenAI for financial summaries and extra SQL questions", key="copilot_use_llm")
-        key = st.text_input("OpenAI API key (optional; also accepts OPENAI_API_KEY)",
-            type="password", key="copilot_api_key") if use_llm else None
-        st.caption("OpenAI receives your question and the aggregate KPIs for a financial summary. "
-            "SQL planning uses your question and the table schema.")
-        if copilot.use_demo_erp:
-            st.caption("Sales: bundled CSV. Invoices, customers and payments: bundled SQLite database. "
-                f"Latest recorded payment: {copilot.snapshot_date}.")
-
-    examples = [
-        "Which customer generated the highest revenue?",
-        "Forecast next month's revenue.",
-        "Explain anomalies.",
-        "Give me a financial KPI summary",
-    ]
-    if copilot.use_demo_erp:
-        examples.insert(1, "Show unpaid invoices.")
-    st.markdown("**Try a question**")
-    columns = st.columns(2)
-    clicked = None
-    for i, example in enumerate(examples):
-        if columns[i % 2].button(example, key=f"copilot_example_{i}", width="stretch"):
-            clicked = example
-
-    if "copilot_messages" not in st.session_state:
-        st.session_state["copilot_messages"] = []
-    for item in st.session_state["copilot_messages"]:
-        with st.chat_message(item["role"]):
-            st.markdown(item["text"])
-            if item["role"] == "assistant":
-                if item.get("note"):
-                    st.caption(item["note"])
-                if item.get("table") is not None and not item["table"].empty:
-                    st.dataframe(item["table"].head(50), width="stretch", hide_index=True)
-                if item.get("sql"):
-                    with st.expander("View generated SQL"):
-                        st.code(item["sql"], language="sql")
-
-    question = st.chat_input("Ask about your ERP finances...", key="copilot_chat_input")
-    request = clicked or question
-    if request:
-        st.session_state["copilot_messages"].append({"role": "user", "text": request})
-        try:
-            response = copilot.ask(request, start_date=start_date, end_date=end_date,
-                use_llm=use_llm, api_key=key)
-            st.session_state["copilot_messages"].append({
-                "role": "assistant", "text": response.answer, "sql": response.sql,
-                "table": response.data, "note": response.details.get("note"),
-            })
-        except (ValueError, RuntimeError, sqlite3.Error) as exc:
-            st.session_state["copilot_messages"].append({
-                "role": "assistant", "text": f"Could not answer safely: {exc}",
-            })
-        st.rerun()
-
-
-def main() -> None:
-    import streamlit as st
-    st.set_page_config(page_title="Lab 1 | AI Financial Copilot", layout="wide")
-    st.title("Lab 1 — AI Financial Copilot")
+    from chat_ui import render_chat_panel as render
+    if copilot is not None:
+        render(copilot, start_date=start_date, end_date=end_date)
+        return
     try:
-        copilot = FinancialCopilot()
-    except (FileNotFoundError, ValueError) as exc:
-        st.error(str(exc))
-        st.stop()
-    render_chat_panel(copilot)
+        with FinancialCopilot() as standalone:
+            render(standalone, start_date=start_date, end_date=end_date)
+    except (FileNotFoundError, ValueError, sqlite3.Error):
+        st.error("The bundled ERP data could not be loaded.")
+
+
+def main():
+    import streamlit as st
+    st.set_page_config(page_title="AI Financial Copilot", layout="wide")
+    render_chat_panel()
 
 
 if __name__ == "__main__":
