@@ -133,7 +133,7 @@ def show_ranking(data, field, label, title, color):
         st.caption(f"Ranked by revenue. Sales with missing {label.lower()} are excluded.")
 
 
-def show_overview(data, monthly, growth):
+def show_business_performance(data, monthly, growth):
     metrics = calculate_metrics(data)
     kpi_cards([
         ("Total revenue", f"{metrics['total_revenue']:,.2f}"),
@@ -196,45 +196,20 @@ def show_overview(data, monthly, growth):
 
 def show_risk(data, growth, start_date, end_date):
     var = calculate_var(growth)
-    flagged = detect_anomalies(data)
-    metrics = []
     if var is not None:
-        metrics.extend([
+        kpi_cards([
             ("95% revenue VaR", f"{var['var_pct']:.1f}%"),
             ("Estimated shortfall", f"{var['shortfall']:,.2f}"),
         ])
-    if flagged is not None:
-        metrics.append(("Transactions to review", f"{len(flagged):,}"))
-    if metrics:
-        kpi_cards(metrics)
 
-    with st.container(key="report_charts"):
-        volatility_panel, anomalies_panel = st.columns(2, gap="medium")
-        with volatility_panel, panel("volatility"):
-            st.subheader("Revenue volatility")
-            risk = rolling_volatility(growth)
-            if risk["volatility"].notna().any():
-                show_chart(monthly_line(risk, "volatility", "Volatility (pp)", BLUE), height=218)
-                st.caption("Rolling six-month standard deviation of monthly revenue growth.")
-            else:
-                st.info("Select seven complete months with consecutive growth observations.")
-        with anomalies_panel, panel("anomaly_trend"):
-            st.subheader("Flags by month")
-            if flagged is None:
-                st.info("Select a period with at least 20 valid transactions.")
-            else:
-                trend = anomaly_trend(flagged, start_date, end_date)
-                chart = (
-                    alt.Chart(trend)
-                    .mark_bar(color=AMBER, cornerRadiusEnd=3)
-                    .encode(
-                        x=month_bar_axis(),
-                        y=alt.Y("anomalies:Q", title="Flagged transactions", axis=alt.Axis(tickMinStep=1)),
-                        tooltip=[month_tooltip(), alt.Tooltip("anomalies:Q", title="Flagged transactions")],
-                    )
-                )
-                show_chart(chart, height=218)
-                st.caption(f"{len(flagged):,} of {len(data):,} transactions flagged by the IQR rule.")
+    with panel("volatility"):
+        st.subheader("Revenue volatility")
+        risk = rolling_volatility(growth)
+        if risk["volatility"].notna().any():
+            show_chart(monthly_line(risk, "volatility", "Volatility (pp)", BLUE), height=218)
+            st.caption("Rolling six-month standard deviation of monthly revenue growth.")
+        else:
+            st.info("Select seven complete months with consecutive growth observations.")
 
     if var is not None:
         baseline_month = var["baseline_month"].strftime("%b %Y")
@@ -245,34 +220,6 @@ def show_risk(data, growth, start_date, end_date):
             )
     else:
         st.caption("Revenue VaR needs 12 valid monthly growth observations.")
-
-    if flagged is not None:
-        with st.expander("Transactions to review"):
-            st.caption(
-                "The IQR rule flags amounts beyond 1.5 times the interquartile range. "
-                "Categories with fewer than 20 rows use the selected transactions as the comparison group."
-            )
-            if flagged.empty:
-                st.info("No transactions were flagged in this period.")
-            else:
-                columns = [
-                    "sale_date", "sale_id", "customer_id", "product_name",
-                    "category", "revenue", "threshold", "reason", "comparison",
-                ]
-                st.dataframe(
-                    flagged[columns], hide_index=True, **FULL_WIDTH,
-                    column_config={
-                        "sale_date": st.column_config.DateColumn("Sale date", format="YYYY-MM-DD"),
-                        "sale_id": "Sale ID",
-                        "customer_id": "Customer ID",
-                        "product_name": "Product",
-                        "category": "Category",
-                        "revenue": st.column_config.NumberColumn("Revenue", format="%.2f"),
-                        "threshold": st.column_config.NumberColumn("Threshold", format="%.2f"),
-                        "reason": "Flag reason",
-                        "comparison": "Comparison group",
-                    },
-                )
 
     with panel("portfolio"):
         st.subheader("Revenue mix")
@@ -299,6 +246,59 @@ def show_risk(data, growth, start_date, end_date):
                     "revenue": st.column_config.NumberColumn("Total revenue", format="%.2f"),
                     "share_pct": st.column_config.NumberColumn("Revenue share (%)", format="%.1f"),
                 },
+            )
+
+
+def show_anomalies(data, start_date, end_date):
+    flagged = detect_anomalies(data)
+    if flagged is None:
+        st.info("Select a period with at least 20 valid transactions to detect anomalies.")
+        return
+
+    kpi_cards([("Flagged transactions", f"{len(flagged):,}")])
+    with panel("anomaly_trend"):
+        st.subheader("Anomalies by month")
+        trend = anomaly_trend(flagged, start_date, end_date)
+        chart = (
+            alt.Chart(trend)
+            .mark_bar(color=AMBER, cornerRadiusEnd=3)
+            .encode(
+                x=month_bar_axis(),
+                y=alt.Y("anomalies:Q", title="Flagged transactions", axis=alt.Axis(tickMinStep=1)),
+                tooltip=[month_tooltip(), alt.Tooltip("anomalies:Q", title="Flagged transactions")],
+            )
+        )
+        show_chart(chart, height=218)
+        st.caption(f"{len(flagged):,} of {len(data):,} transactions flagged by the IQR rule.")
+
+    with panel("flagged_transactions"):
+        st.subheader("Transactions to review")
+        if flagged.empty:
+            st.info("No transactions were flagged in this period.")
+        else:
+            columns = [
+                "sale_date", "sale_id", "customer_id", "product_name",
+                "category", "revenue", "threshold", "reason", "comparison",
+            ]
+            st.dataframe(
+                flagged[columns], hide_index=True, **FULL_WIDTH,
+                column_config={
+                    "sale_date": st.column_config.DateColumn("Sale date", format="YYYY-MM-DD"),
+                    "sale_id": "Sale ID",
+                    "customer_id": "Customer ID",
+                    "product_name": "Product",
+                    "category": "Category",
+                    "revenue": st.column_config.NumberColumn("Revenue", format="%.2f"),
+                    "threshold": st.column_config.NumberColumn("Threshold", format="%.2f"),
+                    "reason": "Flag reason",
+                    "comparison": "Comparison group",
+                },
+            )
+        with st.expander("How transactions are flagged"):
+            st.write(
+                "The IQR rule flags revenue outside the middle 50% of values, extended by "
+                "1.5 times that range on each side. Categories with fewer than 20 rows use "
+                "all selected transactions as the comparison group."
             )
 
 
@@ -507,24 +507,30 @@ def report_transactions(title, report):
     return data
 
 
-def overview(report):
-    data = report_transactions("Overview", report)
+def business_performance(report):
+    data = report_transactions("Business Performance", report)
     if data is not None:
         monthly = monthly_revenue(data, report.start, report.end)
         growth = monthly_growth(data, report.start, report.end)
-        show_overview(data, monthly, growth)
+        show_business_performance(data, monthly, growth)
 
 
-def forecast(report):
-    data = report_transactions("Forecast", report)
+def risk_analytics(report):
+    data = report_transactions("Risk Analytics", report)
+    if data is not None:
+        show_risk(data, monthly_growth(data, report.start, report.end), report.start, report.end)
+
+
+def predictive_analytics(report):
+    data = report_transactions("Predictive Analytics", report)
     if data is not None:
         show_predictions(monthly_growth(data, report.start, report.end))
 
 
-def risk_and_anomalies(report):
-    data = report_transactions("Risk & anomalies", report)
+def anomaly_detection(report):
+    data = report_transactions("Anomaly Detection", report)
     if data is not None:
-        show_risk(data, monthly_growth(data, report.start, report.end), report.start, report.end)
+        show_anomalies(data, report.start, report.end)
 
 
 def copilot_workspace(report):
@@ -549,9 +555,22 @@ def main():
         st.divider()
         report = sidebar_report()
     pages = [
-        st.Page(lambda: overview(report), title="Overview", icon=":material/space_dashboard:", default=True),
-        st.Page(lambda: forecast(report), title="Forecast", icon=":material/timeline:", url_path="forecast"),
-        st.Page(lambda: risk_and_anomalies(report), title="Risk & anomalies", icon=":material/monitoring:", url_path="risk"),
+        st.Page(
+            lambda: business_performance(report), title="Business Performance",
+            icon=":material/space_dashboard:", default=True,
+        ),
+        st.Page(
+            lambda: risk_analytics(report), title="Risk Analytics",
+            icon=":material/monitoring:", url_path="risk",
+        ),
+        st.Page(
+            lambda: predictive_analytics(report), title="Predictive Analytics",
+            icon=":material/timeline:", url_path="forecast",
+        ),
+        st.Page(
+            lambda: anomaly_detection(report), title="Anomaly Detection",
+            icon=":material/troubleshoot:", url_path="anomalies",
+        ),
         st.Page(lambda: copilot_workspace(report), title="AI Financial Copilot", icon=":material/insights:", url_path="copilot"),
     ]
     selected = st.navigation(pages, position="hidden")
