@@ -86,7 +86,7 @@ def month_bar_axis():
     return alt.X(
         "yearmonth(sale_date):O",
         title=None,
-        axis=alt.Axis(format="%b %y", labelAngle=0, labelOverlap="greedy"),
+        axis=alt.Axis(format="%b %y", labelAngle=0, labelOverlap="greedy", labelFlush=True, labelBound=True),
     )
 
 
@@ -167,7 +167,7 @@ def show_overview(data, monthly, growth):
                     )
                 )
                 show_chart(chart, height=245)
-                st.caption("Compared with the previous complete month.")
+                st.caption("Versus the prior full month.")
 
     with st.container(key="ranking_charts"):
         product, customer = st.columns(2, gap="medium")
