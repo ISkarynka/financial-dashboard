@@ -19,6 +19,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from copilot_questions import (
+    COUNT, CUSTOMERS, FORECAST, GREETINGS, INVOICES, MONTHLY, MOST, ORDERS, RECENT,
+    REVENUE, SALES, THANKS, UNPAID, YEAR_OR_DATE, follow_up, is_russian, normalize_question,
+)
 from data_processing import REQUIRED_COLUMNS, calculate_var, monthly_growth
 
 
@@ -285,7 +289,7 @@ class FinancialCopilot:
         end_date: str | date | None = None,
     ) -> QueryPlan:
         """Explainable English/Russian NL-to-SQL for the standard ERP questions."""
-        q = question.casefold().strip()
+        q = normalize_question(question)
         start, end = _date_value(start_date), _date_value(end_date)
         if start and end and start > end:
             raise ValueError("The start date must be before the end date.")
@@ -293,7 +297,7 @@ class FinancialCopilot:
         sale_where = _date_where("s.sale_date", start, end)
         invoice_where = _date_where("i.invoice_date", start, end)
         nmatch = re.search(r"\b(?:top|first|первых|топ)\s*(\d{1,2})\b", q)
-        limit = min(int(nmatch.group(1)), 50) if nmatch else 5
+        limit = max(1, min(int(nmatch.group(1)), 50)) if nmatch else 5
 
         if not self.use_demo_erp and re.search(r"\bpayments?\b|платеж|платёж|оплат", q):
             return QueryPlan("invoice_data_required", "")
@@ -337,14 +341,15 @@ class FinancialCopilot:
         if re.search(r"\brisk\b|\bvar\b|риск", q):
             return QueryPlan("risk", "", params)
 
-        if re.search(r"forecast|predict|projection|next month|прогноз|следующ.{0,8}месяц", q):
+        if FORECAST.search(q):
             return QueryPlan("forecast", """
                 SELECT substr(s.sale_date,1,7) AS month,
                        ROUND(SUM(s.revenue),2) AS revenue
                 FROM sales_clean s
                 """ + sale_where + " GROUP BY substr(s.sale_date,1,7) ORDER BY month", params)
 
-        if re.search(r"unpaid|outstanding|overdue|receivable|неоплач|просроч|задолж|долги|должник|invoice|счет[аов]?", q):
+        unpaid = bool(UNPAID.search(q))
+        if unpaid or INVOICES.search(q):
             if not self.use_demo_erp:
                 return QueryPlan("invoice_data_required", "")
             invoice_id = re.search(r"\bINV\d{5}\b", question, re.I)
@@ -358,24 +363,52 @@ class FinancialCopilot:
                 extra += " AND i.invoice_id = :invoice_id"
             if customer_id:
                 extra += " AND i.customer_id = :customer_id"
-            if not invoice_id and (not customer_id or re.search(r"unpaid|outstanding|overdue|receivable|неоплач|просроч|задолж", q)):
+            if unpaid and not invoice_id:
                 extra += " AND ROUND(i.invoice_value - COALESCE(p.paid,0),2) > 0.01"
-            if re.search(r"overdue|просроч", q):
+            paid = bool(re.search(r"\bpaid\b|\bоплачен\w*\b", q))
+            if paid and not unpaid:
+                extra += " AND ROUND(i.invoice_value - COALESCE(p.paid,0),2) <= 0.01"
+            overdue = bool(re.search(r"overdue|просроч", q))
+            if overdue:
                 params["snapshot_date"] = self.snapshot_date
                 extra += " AND i.due_date < :snapshot_date"
-            return QueryPlan("unpaid_invoices", """
+            invoices = """
                 WITH paid AS (
                   SELECT invoice_id, ROUND(SUM(amount_paid),2) AS paid
                   FROM payments GROUP BY invoice_id
                 )
+            """
+            status = "overdue" if overdue else "outstanding" if unpaid else "paid" if paid else "any"
+            if MONTHLY.search(q):
+                return QueryPlan("monthly_invoices", invoices + """
+                    SELECT substr(i.invoice_date,1,7) AS month, COUNT(*) AS invoices
+                    FROM invoices i LEFT JOIN paid p ON i.invoice_id=p.invoice_id
+                    """ + invoice_where + extra + """
+                    GROUP BY substr(i.invoice_date,1,7) ORDER BY month
+                    """, {**params, "invoice_status": status})
+            if COUNT.search(q):
+                return QueryPlan("invoice_count", invoices + """
+                    SELECT COUNT(*) AS invoices
+                    FROM invoices i LEFT JOIN paid p ON i.invoice_id=p.invoice_id
+                    """ + invoice_where + extra, {**params, "invoice_status": status})
+            invoices += """
                 SELECT i.invoice_id,i.customer_id,i.invoice_date,i.due_date,
                        ROUND(i.invoice_value,2) AS invoice_value,
                        ROUND(COALESCE(p.paid,0),2) AS amount_paid,
                        ROUND(i.invoice_value - COALESCE(p.paid,0),2) AS outstanding
                 FROM invoices i LEFT JOIN paid p ON i.invoice_id=p.invoice_id
-                """ + invoice_where + extra + " ORDER BY outstanding DESC, i.due_date ASC", params)
+                """ + invoice_where + extra
+            if unpaid and not RECENT.search(q):
+                return QueryPlan("unpaid_invoices", invoices + " ORDER BY outstanding DESC, i.due_date ASC", params)
+            requested_limit = re.search(r"\b(\d{1,2})\s+(?:invoices?|bills?|счет\w*)\b", q)
+            params["result_limit"] = max(1, min(int(requested_limit[1]), 50)) if requested_limit else 10
+            return QueryPlan("recent_invoices", invoices + """
+                ORDER BY i.invoice_date DESC, i.invoice_id DESC LIMIT :result_limit
+                """, params)
 
-        if re.search(r"\b(country|countries|странам|страны|страна)\b", q) and re.search(r"revenue|sales|выручк|продаж|top|highest|больш", q):
+        has_sales_metric = REVENUE.search(q) or SALES.search(q)
+        rank_words = MOST.search(q)
+        if re.search(r"\b(country|countries|странам|страны|страна)\b", q) and (has_sales_metric or rank_words):
             if not self.use_demo_erp:
                 return QueryPlan("country_data_required", "")
             return QueryPlan("by_country", """
@@ -384,7 +417,7 @@ class FinancialCopilot:
                 FROM sales_clean s LEFT JOIN customers c ON c.customer_id=s.customer_id
                 """ + sale_where + " GROUP BY COALESCE(c.country,'Unknown') ORDER BY revenue DESC", params)
 
-        if re.search(r"\b(products?|categories|category)\b|товар|продукт|категор", q) and re.search(r"revenue|sales|выручк|продаж|top|highest|больш", q):
+        if re.search(r"\b(products?|categories|category)\b|товар|продукт|категор", q) and (has_sales_metric or rank_words):
             key = "category" if re.search(r"categor|категор", q) else "product_name"
             return QueryPlan("by_product", f"""
                 SELECT s.{key}, ROUND(SUM(s.revenue),2) AS revenue
@@ -392,7 +425,8 @@ class FinancialCopilot:
                 {sale_where} GROUP BY s.{key} ORDER BY revenue DESC LIMIT :result_limit
                 """, {**params, "result_limit": limit})
 
-        if re.search(r"customers?|client|клиент|покупател", q) and re.search(r"revenue|sales|выручк|продаж|top|highest|most|больш|лучш", q):
+        spent_most = re.search(r"\b(?:spent|paid)\s+(?:the\s+)?most\b|кто\s+(?:потратил|купил)\s+больше", q)
+        if spent_most or (CUSTOMERS.search(q) and not COUNT.search(q) and (has_sales_metric or rank_words)):
             customer_match = re.search(r"\bC\d{4}\b", question, re.I)
             extra_filter = ""
             if customer_match:
@@ -420,14 +454,33 @@ class FinancialCopilot:
                 """
             return QueryPlan("top_customers", ranking, {**params, "result_limit": limit})
 
-        if re.search(r"monthly|by month|month-by-month|по месяц|помесячн|динамик", q) and re.search(r"revenue|sales|выручк|продаж", q):
-            return QueryPlan("monthly_revenue", """
-                SELECT substr(s.sale_date,1,7) AS month,
-                       ROUND(SUM(s.revenue),2) AS revenue
-                FROM sales_clean s
-                """ + sale_where + " GROUP BY substr(s.sale_date,1,7) ORDER BY month", params)
+        if MONTHLY.search(q) and has_sales_metric:
+            if COUNT.search(q) and SALES.search(q) and not REVENUE.search(q):
+                intent, metric = "monthly_sales_count", "COUNT(*) AS transactions"
+            else:
+                intent, metric = "monthly_revenue", "ROUND(SUM(s.revenue),2) AS revenue"
+            return QueryPlan(intent, f"""
+                SELECT substr(s.sale_date,1,7) AS month, {metric}
+                FROM sales_clean s {sale_where}
+                GROUP BY substr(s.sale_date,1,7) ORDER BY month
+                """, params)
 
+        if ORDERS.search(q):
+            return QueryPlan("clarify_orders", "")
+
+        if COUNT.search(q) and CUSTOMERS.search(q):
+            return QueryPlan("customer_count", "SELECT COUNT(DISTINCT s.customer_id) AS customers FROM sales_clean s" + sale_where, params)
+        if COUNT.search(q) and SALES.search(q) and not REVENUE.search(q):
+            return QueryPlan("sales_count", "SELECT COUNT(*) AS transactions FROM sales_clean s" + sale_where, params)
         explain_kpi = re.search(r"average transaction|average sale|средн.{0,15}(чек|транзакц|продаж)", q)
+        if not explain_kpi and SALES.search(q) and (RECENT.search(q) or re.search(r"\b(?:transactions?|транзакци\w*)\b", q)):
+            size = re.search(r"\b(\d{1,2})\s+(?:sales?|transactions?|продаж\w*|транзакци\w*)\b", q)
+            params["result_limit"] = max(1, min(int(size[1]), 50)) if size else 10
+            return QueryPlan("recent_sales", """
+                SELECT s.sale_date, s.sale_id, s.customer_id, s.product_name, ROUND(s.revenue, 2) AS revenue
+                FROM sales_clean s
+                """ + sale_where + " ORDER BY s.sale_date DESC, s.sale_id DESC LIMIT :result_limit", params)
+
         if explain_kpi or re.search(r"summary|summari|kpi|overview|financial|сводк|итог|показател|финансов", q):
             return QueryPlan("kpi" if explain_kpi else "summary", """
                 SELECT ROUND(SUM(s.revenue),2) AS total_revenue,
@@ -436,6 +489,9 @@ class FinancialCopilot:
                        ROUND(AVG(s.revenue),2) AS average_transaction
                 FROM sales_clean s
                 """ + sale_where, params)
+
+        if has_sales_metric:
+            return QueryPlan("total_revenue", "SELECT ROUND(SUM(s.revenue), 2) AS total_revenue FROM sales_clean s" + sale_where, params)
 
         return QueryPlan("unknown", "")
 
@@ -480,8 +536,13 @@ class FinancialCopilot:
             if not isinstance(sql, str):
                 raise ValueError("The model did not return SQL.")
             return self._model_sql(sql, start, end)
+        if action == "clarify":
+            message = decision.get("message")
+            if not isinstance(message, str) or not message.strip() or len(message) > 400:
+                raise ValueError("The model did not return a short clarification.")
+            return CopilotAnswer("clarify", message.strip())
         if action == "unsupported":
-            return self._ask_local(question, start, end)
+            return None
         if action not in ANALYSIS_TOOLS:
             raise ValueError("The model chose an unavailable data tool.")
         tool_question, heading = ANALYSIS_TOOLS[action]
@@ -511,14 +572,32 @@ class FinancialCopilot:
         start, end = _date_value(start_date), _date_value(end_date)
         if start and end and start > end:
             raise ValueError("The start date must be before the end date.")
+        history = list(history)
+        interpreted, requested = follow_up(question, history)
+        russian = is_russian(question) or (not re.search(r"[a-zа-я]", question, re.I) and is_russian(interpreted))
+        if requested and not FORECAST.search(interpreted):
+            first, last = requested
+            if (end and first > end) or (start and last < start):
+                message = (
+                    "Эти даты выходят за пределы выбранного отчёта. Выбери другие даты в Reporting period."
+                    if russian else "Those dates are outside the selected report. Choose different dates in Reporting period."
+                )
+                return CopilotAnswer("outside_report", message)
+            start = max(start, first) if start else first
+            end = min(end, last) if end else last
         if use_llm:
             try:
-                return self._ask_model(question, start, end, history, api_key, model)
+                answer = self._ask_model(question, start, end, history, api_key, model)
+                if answer is not None:
+                    return answer
             except (ValueError, RuntimeError, sqlite3.Error):
-                result = self._ask_local(question, start, end)
-                result.details["note"] = "The model could not complete this request. Showing the local result."
+                result = self._ask_local(interpreted, start, end, russian=russian)
+                result.details["note"] = (
+                    "Модель недоступна для этого вопроса. Ответил встроенный режим."
+                    if russian else "The model could not complete this request. Showing the local result."
+                )
                 return result
-        return self._ask_local(question, start, end)
+        return self._ask_local(interpreted, start, end, russian=russian)
 
     def _explain_risk(self, start_date, end_date):
         if self.sales.empty:
@@ -551,19 +630,56 @@ class FinancialCopilot:
             f"It uses {risk['observations']} monthly growth observations. Future declines can exceed it.",
             details={"evidence": evidence})
 
-    def _ask_local(self, question, start_date, end_date):
+    def _ask_local(self, question, start_date, end_date, *, russian=False):
+        q = normalize_question(question).strip(" ?!.")
+        if q in GREETINGS:
+            return CopilotAnswer("greeting", "Привет! Что посмотрим? Например, «выручка по месяцам»."
+                                if russian else "Hi! What would you like to see? Try “revenue by month”.")
+        if q in THANKS:
+            return CopilotAnswer("acknowledgement", "Пожалуйста." if russian else "You're welcome.")
+        if len(YEAR_OR_DATE.findall(q)) > 1:
+            return CopilotAnswer("clarify_period",
+                "Какой период показать первым? Например, «выручка за 2025»." if russian
+                else "Which period should I show first? For example, “revenue in 2025”.")
+        if re.search(r"\b(?:last|previous) (?:month|quarter|year)\b|прошл\w* (?:месяц\w*|квартал\w*|год\w*)", q):
+            return CopilotAnswer("clarify_period",
+                "Укажи месяц и год или только год. Например, «выручка за март 2025»." if russian
+                else "Which month and year should I use? For example, “revenue in March 2025”.")
+        if re.search(r"\b(?:profits?|margins?|прибыл\w*|марж\w*)\b", q):
+            return CopilotAnswer("unsupported_metric",
+                "Для прибыли нужны себестоимость и расходы. По этому отчёту могу посчитать выручку."
+                if russian else "Profit requires costs and expenses. I can calculate sales revenue from this report.")
         plan = self.plan_query(question, start_date, end_date)
-        if plan.intent == "invoice_data_required":
-            return CopilotAnswer(plan.intent, "This question requires invoice and payment records. "
-                "Use Explore demo to try it with the sample ERP records.")
-        if plan.intent == "country_data_required":
-            return CopilotAnswer(plan.intent, "A country breakdown requires customer country records. "
-                "You can rank customers from this CSV by customer ID.")
-        if plan.intent == "unknown":
-            topics = "top customers, monthly revenue, forecasts, financial KPIs, revenue risk and anomalies"
+        if plan.intent == "clarify_orders":
             if self.use_demo_erp:
-                topics += ", plus unpaid invoices and fraud-risk flags"
-            return CopilotAnswer("help", f"Try a question about {topics}.")
+                message = ("Под заказами ты имеешь в виду **счета** или **строки продаж**? "
+                           "Могу показать «последние счета», «неоплаченные счета» или «последние продажи».") if russian else (
+                    "By orders, do you mean **invoices** or **sales transactions**? "
+                    "I can show “latest invoices”, “unpaid invoices”, or “recent sales”.")
+            else:
+                message = ("По этому CSV могу показать **последние продажи** или **количество продаж**. Что нужно?"
+                           if russian else "From this CSV I can show **recent sales** or **the sales count**. Which one?")
+            return CopilotAnswer(plan.intent, message)
+        if plan.intent == "invoice_data_required":
+            return CopilotAnswer(plan.intent, ("Нужны данные о счетах и платежах. Их можно посмотреть в режиме **Demo data**."
+                if russian else "This requires invoice and payment records. You can try it using **Demo data**."))
+        if plan.intent == "country_data_required":
+            return CopilotAnswer(plan.intent, ("Для разбивки по странам нужны страны клиентов. По этому файлу доступен рейтинг по ID."
+                if russian else "A country breakdown requires customer country records. This CSV supports rankings by customer ID."))
+        if plan.intent == "unknown":
+            if MONTHLY.search(q):
+                message = ("Что разбить по месяцам — **выручку** или **число продаж**?" if russian
+                           else "What should I break down by month — **revenue** or **sales count**?")
+            elif CUSTOMERS.search(q):
+                message = ("Показать **топ покупателей по выручке** или **количество покупателей**?"
+                           if russian else "Would you like the **top buyers by revenue** or the **number of customers**?")
+            elif re.search(r"\bowners?\b|владелец|владельц", q):
+                message = ("Владелец чего? В данных можно найти клиента по счёту, если ты про это."
+                           if russian else "Which owner do you mean? The demo can look up the customer on an invoice.")
+            else:
+                message = ("Что нужно посчитать или показать? Например, «выручка за 2025» или «последние продажи»."
+                           if russian else "What would you like to calculate or see? Try “revenue in 2025” or “recent sales”.")
+            return CopilotAnswer("clarify", message)
 
         if plan.intent == "risk":
             return self._explain_risk(start_date, end_date)
@@ -638,9 +754,42 @@ class FinancialCopilot:
                  "historical_months": len(series)})
 
         table = self.execute_readonly(plan.sql, plan.params)
+        invoice_labels = {
+            "overdue": ("Overdue invoices", "Просроченные счета"),
+            "outstanding": ("Invoices with a balance", "Счета с остатком"),
+            "paid": ("Paid invoices", "Оплаченные счета"),
+            "any": ("Invoices", "Счета"),
+        }
+        if plan.intent in ("recent_sales", "recent_invoices"):
+            if plan.intent == "recent_sales":
+                label, label_ru = "sales transactions", "строки продаж"
+            else:
+                label, label_ru = "matching invoices", "подходящие счета"
+            if table.empty:
+                msg = "За этот период подходящих записей нет." if russian else "No matching records for this period."
+            else:
+                msg = (f"Показываю {len(table):,} последних записей за выбранный период ({label_ru})." if russian
+                       else f"Here are the {len(table):,} most recent {label} in the selected period.")
+            return CopilotAnswer(plan.intent, msg, plan.sql, table)
+        if plan.intent in ("sales_count", "customer_count", "invoice_count", "total_revenue"):
+            label, label_ru = {
+                "sales_count": ("Sales transactions", "Строки продаж"),
+                "customer_count": ("Customers with sales", "Клиенты с покупками"),
+                "invoice_count": invoice_labels[plan.params.get("invoice_status", "any")],
+                "total_revenue": ("Valid sales revenue", "Выручка по продажам"),
+            }[plan.intent]
+            value = table.iloc[0, 0]
+            if pd.isna(value):
+                msg = "За этот период нет продаж." if russian else "No sales match this period."
+            else:
+                number = _money(value) if plan.intent == "total_revenue" else f"{int(value):,}"
+                period = f" ({start_date} — {end_date})" if start_date and end_date else ""
+                msg = f"{label_ru if russian else label}{period} — **{number}**."
+            return CopilotAnswer(plan.intent, msg, plan.sql, table)
         if plan.intent == "top_customers":
             if table.empty:
-                msg = "No customers with valid sales match the selected period."
+                msg = ("За этот период нет покупателей с продажами."
+                       if russian else "No customers with valid sales match the selected period.")
             elif len(table) == 1:
                 top = table.iloc[0]
                 name = top.get("customer_name")
@@ -650,12 +799,16 @@ class FinancialCopilot:
                 msg = (f"{descriptor}: {customer}, "
                     f"with {_money(top['revenue'])} in valid sales revenue across "
                     f"{int(top['transactions'])} transactions.")
+                if russian:
+                    lead = "Выручка по покупателю" if "customer_id" in plan.params else "Лидер по выручке"
+                    msg = f"{lead} — **{customer}**, {_money(top['revenue'])} по {int(top['transactions'])} продажам."
             else:
-                msg = f"Top {len(table)} customers ranked by valid sales revenue."
+                msg = (f"Топ-{len(table)} покупателей по выручке." if russian
+                       else f"Top {len(table)} customers ranked by valid sales revenue.")
             return CopilotAnswer(plan.intent, msg, plan.sql, table)
         if plan.intent == "unpaid_invoices":
             if table.empty:
-                msg = "No matching outstanding invoices were found."
+                msg = "Неоплаченных счетов за этот период нет." if russian else "No matching outstanding invoices were found."
             else:
                 outstanding = table["outstanding"].clip(lower=0)
                 paid0 = int((table["amount_paid"].abs() < 0.01).sum())
@@ -663,9 +816,14 @@ class FinancialCopilot:
                     f"{_money(outstanding.sum())}. {paid0} have no recorded payment. "
                     f"Payments are available through {self.snapshot_date}; this is a historical "
                     "ERP snapshot, not a live banking balance.")
+                if russian:
+                    msg = (f"Найдено {len(table):,} счетов с остатком на сумму {_money(outstanding.sum())}. "
+                           f"По {paid0} из них нет записей об оплате. Данные о платежах по {self.snapshot_date}.")
                 if table.attrs.get("truncated"):
-                    msg = (f"Showing only the first {MAX_ROWS} matches; displayed outstanding subtotal "
-                        f"is {_money(outstanding.sum())}. Data snapshot through {self.snapshot_date}.")
+                    msg = (f"Первые {MAX_ROWS} счетов. Остаток по ним — {_money(outstanding.sum())}. "
+                           f"Данные по {self.snapshot_date}." if russian else
+                           f"Showing only the first {MAX_ROWS} matches; displayed outstanding subtotal "
+                           f"is {_money(outstanding.sum())}. Data snapshot through {self.snapshot_date}.")
             return CopilotAnswer(plan.intent, msg, plan.sql, table)
         if plan.intent in ("summary", "kpi"):
             row = table.iloc[0]
@@ -696,10 +854,24 @@ class FinancialCopilot:
                 f"average sales transaction: {_money(evidence['average_transaction_value'])}. "
                 "Amounts are in unspecified source currency and exclude invalid sales.",
                 plan.sql, table, {"evidence": evidence})
-        if plan.intent == "monthly_revenue":
-            msg = f"Monthly valid-sales revenue across {len(table)} months."
+        if plan.intent in ("monthly_revenue", "monthly_sales_count", "monthly_invoices"):
+            if table.empty:
+                msg = "За этот период нет записей." if russian else "No records match this period."
+            else:
+                first_month, last_month = table["month"].iloc[0], table["month"].iloc[-1]
+                label, label_ru = {
+                    "monthly_revenue": ("Sales revenue", "Выручка"),
+                    "monthly_sales_count": ("Sales transactions", "Число продаж"),
+                    "monthly_invoices": invoice_labels[plan.params.get("invoice_status", "any")],
+                }[plan.intent]
+                msg = (f"{label_ru} по месяцам за {first_month} — {last_month}." if russian
+                       else f"{label} by month from {first_month} to {last_month}.")
             return CopilotAnswer(plan.intent, msg, plan.sql, table)
         if plan.intent in ("by_product", "by_country"):
+            if russian:
+                group = "категориям" if "category" in table else "странам" if "country" in table else "товарам"
+                message = f"Выручка по {group} за выбранный период." if not table.empty else "За этот период нет продаж."
+                return CopilotAnswer(plan.intent, message, plan.sql, table)
             if plan.intent == "by_country" and not table.empty:
                 msg = f"Highest-revenue country: {table.iloc[0]['country']} ({_money(table.iloc[0]['revenue'])}). "
             else:
