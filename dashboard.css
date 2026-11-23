@@ -1,0 +1,207 @@
+/* daisyUI 5.8.2 stat component
+MIT License
+
+Copyright (c) 2020 Pouya Saadeghi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+@layer daisyui.l1.l2.l3 {
+    .stats {
+        display: inline-grid;
+        position: relative;
+        grid-auto-flow: column;
+        border-radius: var(--radius-box);
+        overflow-x: auto;
+    }
+    .stat {
+        display: inline-grid;
+        grid-template-columns: repeat(1, 1fr);
+        column-gap: 1rem;
+        width: 100%;
+        padding: 1rem 1.5rem;
+    }
+    .stat-title {
+        grid-column-start: 1;
+        white-space: nowrap;
+        color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+        font-size: .75rem;
+    }
+    .stat-value {
+        grid-column-start: 1;
+        white-space: nowrap;
+        font-size: 2rem;
+        font-weight: 800;
+    }
+}
+
+.stApp {
+    --color-base-100: light-dark(#f3f5f8, #14171c);
+    --color-base-200: light-dark(#fff, #202630);
+    --color-base-300: light-dark(#dbe2ec, #343e4d);
+    --color-base-content: light-dark(#17202c, #f3f5f9);
+    --fd-muted: light-dark(#506174, #b6c2d2);
+    --fd-accent: light-dark(#185c98, #a1ccfa);
+    --fd-accent-surface: light-dark(#dce9f6, #263d57);
+    --fd-shadow: 0 2px 7px light-dark(#172b4410, #0003);
+}
+
+[data-testid="stMainBlockContainer"] {
+    max-width: 88rem;
+    container-type: inline-size;
+    padding-top: clamp(2.7rem, 3.4vw, 3.55rem);
+    padding-inline: clamp(1rem, 4.4vw, 4rem);
+    padding-bottom: 2.5rem;
+}
+
+[data-testid="stMainBlockContainer"]:has(.st-key-copilot_page),
+[data-testid="stMain"]:has(.st-key-copilot_page) [data-testid="stBottomBlockContainer"] {
+    max-width: 64rem;
+}
+
+.fd-brand {
+    padding: .45rem .35rem .8rem;
+    color: var(--color-base-content);
+    font-weight: 700;
+    font-size: 1.03rem;
+    letter-spacing: -.025em;
+}
+
+.fd-page-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: .55rem 1rem;
+    margin: 0 0 .65rem;
+}
+
+.fd-page-heading h1, .st-key-copilot_page h1 {
+    font-family: system-ui, -apple-system, sans-serif;
+    color: var(--color-base-content);
+    font-size: clamp(2rem, 3.4vw, 3rem);
+    letter-spacing: -.047em;
+    line-height: 1.1;
+    margin: 0;
+    padding: 0;
+}
+
+.fd-page-heading .fd-period {
+    margin: .5rem 0 0;
+    color: var(--fd-muted);
+    font-size: .875rem;
+}
+
+.fd-source {
+    color: var(--fd-accent);
+    background: var(--fd-accent-surface);
+    border-radius: 999px;
+    padding: .35rem .7rem;
+    font-size: .78rem;
+    font-weight: 620;
+}
+
+.fd-metrics.stats {
+    --radius-box: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+    grid-auto-flow: row;
+    gap: .75rem;
+    overflow: visible;
+    margin-bottom: .35rem;
+}
+
+.fd-metrics.stats[data-count="1"] { grid-template-columns: minmax(0, 1fr); }
+.fd-metrics.stats[data-count="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.fd-metrics.stats[data-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.fd-metrics.stats[data-count="4"] { grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr)); }
+
+.fd-metrics .stat {
+    min-width: 0;
+    border: 1px solid var(--color-base-300);
+    border-radius: 14px;
+    padding: .95rem 1.05rem 1.05rem;
+    color: var(--color-base-content);
+    background: var(--color-base-200);
+    box-shadow: var(--fd-shadow);
+}
+
+.fd-metrics .stat-title {
+    white-space: normal;
+    color: var(--fd-muted);
+    font-size: .81rem;
+    font-weight: 550;
+}
+
+.fd-metrics .stat-value {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    margin-top: .25rem;
+    font-size: clamp(1.17rem, 3.7cqw, 1.8rem);
+    font-family: system-ui, -apple-system, sans-serif;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -.04em;
+}
+
+div[class*="st-key-panel_"] {
+    background: var(--color-base-200);
+    border: 1px solid var(--color-base-300);
+    border-radius: 14px;
+    box-shadow: var(--fd-shadow);
+    padding: clamp(.8rem, 1.45vw, 1.2rem);
+}
+
+[data-testid="stMain"] h2, [data-testid="stMain"] h3 {
+    font-family: system-ui, -apple-system, sans-serif;
+    letter-spacing: -.025em;
+}
+
+[data-testid="stMain"] h3 { font-size: 1rem; }
+[data-testid="stMain"] [data-testid="stCaptionContainer"] p { color: var(--fd-muted); }
+
+.st-key-workspace_nav a[aria-current="page"],
+.st-key-copilot_chat_list button[data-testid="stBaseButton-primary"] {
+    color: var(--fd-accent);
+    background: var(--fd-accent-surface);
+    border-color: transparent;
+}
+.st-key-workspace_nav a { min-height: 2.25rem; }
+.st-key-copilot_chat_list button[data-testid="stBaseButton-primary"]:hover {
+    background: color-mix(in srgb, var(--fd-accent-surface) 88%, var(--fd-accent));
+    border-color: transparent;
+}
+.st-key-copilot_chat_list [data-testid="stButton"] button {
+    justify-content: flex-start;
+    text-align: left;
+}
+.st-key-copilot_page [data-testid="stChatMessage"] { border-radius: 14px; }
+
+@container (max-width: 630px) {
+    .st-key-report_charts [data-testid="stHorizontalBlock"],
+    .st-key-ranking_charts [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+    .st-key-report_charts [data-testid="stColumn"],
+    .st-key-ranking_charts [data-testid="stColumn"] { flex: 1 1 100%; min-width: 0; }
+    .fd-metrics.stats[data-count="4"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container (max-width: 440px) {
+    .fd-metrics.stats { gap: .45rem; }
+    .fd-metrics .stat { padding: .75rem; }
+    .fd-metrics.stats[data-count="3"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -7,7 +7,8 @@ streamlit run app.py
 
 Open **AI Financial Copilot** in the sidebar. Suggested questions cover revenue,
 unpaid invoices, forecasting, anomalies, KPIs, risk, and fraud review. The app
-uses either the bundled ERP dataset or a sales CSV selected on **Dashboard**.
+uses either the bundled ERP dataset or a sales CSV selected under **Data source**
+in the sidebar.
 **New chat** starts a separate conversation, and **Download chat** exports the
 selected conversation as JSON.
 

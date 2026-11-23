@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from datetime import date
 from hashlib import sha256
 from html import escape
 from pathlib import Path
@@ -28,13 +30,10 @@ from data_processing import (
 
 st.set_page_config(page_title="Financial Decision Support Dashboard", layout="wide")
 
-TEAL = "#087f72"
-BLUE = "#3875a0"
-AMBER = "#a65b16"
-RED = "#b74748"
-INK = "#173247"
-MUTED = "#536979"
-PALETTE = [TEAL, BLUE, "#6b63a6", "#b97135", "#2a8f9e", "#647d4c", "#a35d79", "#8798a4"]
+TEAL = "#238779"
+BLUE = "#4b85ba"
+AMBER = "#b77246"
+RED = "#bf6371"
 FULL_WIDTH = (
     {"width": "stretch"}
     if "width" in signature(st.altair_chart).parameters
@@ -42,356 +41,51 @@ FULL_WIDTH = (
 )
 
 
-def apply_style():
-    st.markdown(
-        """
-        <style>
-        .stApp, [data-testid="stHeader"] { background: #f4f7fa; color: #173247; }
-        [data-testid="stMainBlockContainer"], .main .block-container {
-            max-width: 1410px;
-            padding-top: 3.3rem;
-            padding-bottom: 2.5rem;
-        }
-        [data-testid="stSidebar"] {
-            background: #eef4f6;
-            border-right: 1px solid #dce6eb;
-        }
-        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
-        [data-testid="stSidebar"] [data-testid="stWidgetLabel"],
-        [data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] {
-            color: #173247;
-        }
-        [data-testid="stVerticalBlockBorderWrapper"] > div,
-        [data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {
-            border-color: #dce6ec;
-        }
-        div[class*="st-key-panel_"] {
-            background: #fff;
-            border-color: #dce6ec;
-            border-radius: 14px;
-        }
-        [data-testid="stMain"] h2, [data-testid="stMain"] h3 {
-            color: #173247;
-            letter-spacing: -.023em;
-        }
-        [data-testid="stMain"] h2 { font-size: 1.55rem; }
-        [data-testid="stMain"] h3 { font-size: 1.12rem; }
-        [data-testid="stCaptionContainer"] p {
-            color: #536979 !important;
-        }
-        [data-testid="stTabs"] [role="tablist"] {
-            gap: .28rem;
-            flex-wrap: wrap;
-            padding: .28rem;
-            border: 1px solid #dce6ec;
-            border-radius: 11px;
-            background: #fff;
-        }
-        [data-testid="stTabs"] [role="tab"] {
-            border-radius: 7px;
-            padding: .38rem .75rem;
-            color: #425d70;
-        }
-        [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
-            background: #dff2ee;
-            color: #075b51;
-            font-weight: 650;
-        }
-        [data-testid="stTabs"] .react-aria-SelectionIndicator,
-        [data-testid="stTabs"] [data-baseweb="tab-highlight"],
-        [data-testid="stTabs"] [data-baseweb="tab-border"] { display: none; }
-        .fd-hero {
-            position: relative;
-            isolation: isolate;
-            overflow: hidden;
-            padding: clamp(1.25rem, 3vw, 2rem) clamp(1.15rem, 3.5vw, 2.5rem);
-            border-radius: 18px;
-            background: linear-gradient(112deg, #102a43 0%, #143d50 60%, #086358 100%);
-            color: #fff;
-            box-shadow: 0 8px 22px rgba(16, 42, 67, .10);
-        }
-        .fd-hero h1 {
-            font-size: clamp(1.7rem, 3vw, 2.7rem);
-            line-height: 1.14;
-            letter-spacing: -.035em;
-            color: #fff;
-            margin: 0;
-            padding: 0;
-            font-weight: 730;
-        }
-        .fd-hero p {
-            margin: .6rem 0 0;
-            max-width: 36rem;
-            color: #d3e8e9;
-            font-size: .97rem;
-        }
-        .fd-eyebrow {
-            color: #a1e6d7;
-            font-size: .70rem;
-            font-weight: 700;
-            letter-spacing: .16em;
-            text-transform: uppercase;
-            margin-bottom: .58rem;
-        }
-        .fd-motif {
-            position: absolute;
-            z-index: -1;
-            right: 1rem;
-            bottom: .4rem;
-            width: 30%;
-            min-width: 13rem;
-            opacity: .36;
-        }
-        .fd-brand {
-            display: flex;
-            align-items: center;
-            gap: .7rem;
-            margin: .2rem 0 1.25rem;
-            color: #173247;
-            font-size: 1rem;
-            font-weight: 690;
-        }
-        .fd-brand-icon {
-            display: grid;
-            place-items: center;
-            width: 2.2rem;
-            height: 2.2rem;
-            background: #086b60;
-            border-radius: 9px;
-            color: #fff;
-        }
-        .fd-period {
-            display: flex;
-            align-items: baseline;
-            flex-wrap: wrap;
-            gap: .25rem .7rem;
-            color: #536979;
-            font-size: .83rem;
-            padding: .5rem 0 .38rem;
-        }
-        .fd-period strong { color: #173247; }
-        .fd-kpis {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
-            gap: .7rem;
-            margin: .15rem 0 .25rem;
-        }
-        .fd-kpi {
-            padding: .85rem 1rem .9rem;
-            background: #fff;
-            border: 1px solid #dce6ec;
-            border-top: 3px solid #0d8174;
-            border-radius: 12px;
-        }
-        .fd-kpi-label { color: #536979; font-size: .79rem; font-weight: 650; }
-        .fd-kpi-value {
-            color: #102a43;
-            font-size: clamp(1.3rem, 2.3vw, 1.85rem);
-            font-weight: 730;
-            letter-spacing: -.035em;
-            font-variant-numeric: tabular-nums;
-            line-height: 1.2;
-            margin-top: .28rem;
-            overflow-wrap: anywhere;
-        }
-        div.st-key-dashboard_home {
-            max-width: 73rem;
-            margin: clamp(.25rem, 2vw, 1.5rem) auto 0;
-        }
-        div.st-key-home_intro, div.st-key-home_preview {
-            min-height: 26rem;
-            padding: clamp(1.4rem, 2.7vw, 2.4rem);
-            border-radius: 22px;
-        }
-        div.st-key-home_intro {
-            justify-content: center;
-            background: radial-gradient(ellipse at 100% 0%, #235953 0%, transparent 70%), #123433;
-            color: #fff;
-            box-shadow: 0 16px 36px rgba(18, 52, 51, .14);
-        }
-        .fd-home-title {
-            margin: 0;
-            padding: 0;
-            font-size: clamp(2.5rem, 4.65vw, 4.3rem);
-            font-weight: 730;
-            line-height: .99;
-            letter-spacing: -.05em;
-            color: #fff;
-        }
-        .fd-home-copy {
-            max-width: 23rem;
-            margin: 1.15rem 0 .65rem;
-            color: #d0e6e1;
-            font-size: 1.04rem;
-            line-height: 1.6;
-        }
-        div.st-key-data_source_actions button { min-height: 2.75rem; border-radius: 9px; }
-        div.st-key-home_intro button[data-testid="stBaseButton-primary"] {
-            color: #113731;
-            background: #a2e8d3;
-            border-color: #a2e8d3;
-            font-weight: 650;
-        }
-        div.st-key-home_intro button[data-testid="stBaseButton-primary"]:hover {
-            background: #c0f4e4;
-            border-color: #c0f4e4;
-        }
-        div.st-key-home_intro button[data-testid="stBaseButton-secondary"] {
-            color: #f0faf7;
-            background: transparent;
-            border-color: #759891;
-        }
-        div.st-key-home_intro button[data-testid="stBaseButton-secondary"]:hover {
-            background: #28534d;
-            border-color: #a8d0c7;
-        }
-        div.st-key-home_preview {
-            background: #fff;
-            border: 1px solid #d9e7e5;
-            box-shadow: 0 12px 32px rgba(20, 54, 52, .07);
-        }
-        .fd-home-preview h2 { margin: 0; padding: 0; }
-        .fd-home-dates { margin: .25rem 0 0; color: #536979; font-size: .87rem; }
-        .fd-home-metrics {
-            display: grid;
-            grid-template-columns: 1.45fr 1fr .85fr;
-            gap: .85rem;
-            margin: 1rem 0 0;
-            padding: .85rem 0;
-            border-block: 1px solid #e5edeb;
-        }
-        .fd-home-metrics dt { color: #536979; font-size: .8rem; }
-        .fd-home-metrics dd {
-            margin: .15rem 0 0;
-            color: #143b36;
-            font-size: clamp(1.12rem, 2vw, 1.65rem);
-            font-variant-numeric: tabular-nums;
-            font-weight: 710;
-            letter-spacing: -.04em;
-        }
-        [data-testid="stMainBlockContainer"]:has(.st-key-copilot_page) { max-width: 64rem; }
-        .st-key-copilot_page h1 { letter-spacing: -.035em; }
-        .st-key-copilot_page [data-testid="stChatMessage"] {
-            border-radius: 14px;
-        }
-        [data-testid="stMain"]:has(.st-key-copilot_page) [data-testid="stBottomBlockContainer"] {
-            max-width: 64rem;
-        }
-        .st-key-copilot_chat_list [data-testid="stButton"] button {
-            justify-content: flex-start;
-            text-align: left;
-        }
-        .st-key-copilot_chat_list button[data-testid="stBaseButton-primary"] {
-            color: #075b51;
-            background: #dff2ee;
-            border-color: #b9dcd5;
-        }
-        @media (max-width: 820px) {
-            div.st-key-dashboard_home [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
-            div.st-key-dashboard_home [data-testid="stColumn"] { flex: 1 1 100%; min-width: 0; }
-            div.st-key-home_intro, div.st-key-home_preview { min-height: 0; }
-        }
-        @media (max-width: 650px) {
-            .fd-hero { border-radius: 13px; }
-            .fd-motif { opacity: .14; }
-            [data-testid="stTabs"] [role="tab"] { padding: .3rem .45rem; }
-        }
-        @media (max-width: 450px) {
-            .fd-home-metrics { grid-template-columns: 1fr 1fr; }
-            .fd-home-metrics div:first-child { grid-column: 1 / -1; }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def hero():
-    st.markdown(
-        """
-        <div class="fd-hero">
-            <svg class="fd-motif" viewBox="0 0 340 130" fill="none"
-                 aria-hidden="true" focusable="false">
-                <path d="M0 110H340M0 80H340M0 50H340M0 20H340
-                         M30 0V130M90 0V130M150 0V130M210 0V130M270 0V130M330 0V130"
-                      stroke="#bcf2e5" stroke-opacity=".30"/>
-                <path d="M8 113L57 89L105 98L153 62L201 75L253 39L300 45L332 11"
-                      stroke="#a6f0dc" stroke-width="2.5" stroke-linecap="round"
-                      stroke-linejoin="round"/>
-                <circle cx="332" cy="11" r="4" fill="#caf9ed"/>
-            </svg>
-            <div class="fd-eyebrow">Finance Analytics</div>
-            <h1>Financial Decision Support Dashboard</h1>
-            <p>Explore sales performance, revenue risk, forecasts, and unusual transactions.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def sidebar_brand():
-    st.markdown(
-        """
-        <div class="fd-brand">
-            <span class="fd-brand-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" width="19" height="19" fill="none">
-                    <path d="M4 18V13M10 18V8M16 18V4M22 18H2"
-                          stroke="currentColor" stroke-width="2"
-                          stroke-linecap="round"/>
-                </svg>
-            </span>
-            <span>Financial Dashboard</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
+def page_heading(title, report):
+    start, end = report.start, report.end
+    source = "Demo data" if report.is_demo else "My data"
+    st.html(
+        '<header class="fd-page-heading">'
+        f'<div><h1>{escape(title)}</h1><p class="fd-period">{start:%d %b %Y} – {end:%d %b %Y}</p></div>'
+        f'<span class="fd-source">{source}</span></header>'
     )
 
 
 def kpi_cards(items):
     cards = "".join(
-        '<div class="fd-kpi">'
-        f'<div class="fd-kpi-label">{escape(label)}</div>'
-        f'<div class="fd-kpi-value">{escape(value)}</div>'
+        '<div class="stat">'
+        f'<div class="stat-title">{escape(label)}</div>'
+        f'<div class="stat-value">{escape(value)}</div>'
         '</div>'
         for label, value in items
     )
-    st.markdown(f'<div class="fd-kpis">{cards}</div>', unsafe_allow_html=True)
+    st.html(f'<div class="stats fd-metrics" data-count="{len(items)}">{cards}</div>')
 
 
 def panel(name):
-    return st.container(border=True, key=f"panel_{name}")
+    return st.container(key=f"panel_{name}")
 
 
 def show_chart(chart, height=255):
     chart = (
         chart.properties(height=height)
-        .configure(background="#ffffff", font="sans-serif")
+        .configure(background="transparent")
         .configure_view(stroke=None)
-        .configure_axis(
-            gridColor="#e7eef2",
-            domain=False,
-            tickColor="#dce6ec",
-            labelColor=MUTED,
-            labelFontSize=11,
-            titleColor=INK,
-            titlePadding=12,
-            labelPadding=7,
-        )
-        .configure_legend(
-            orient="top", labelColor=INK, titleColor=INK, labelFontSize=11
-        )
+        .configure_axis(domain=False, gridOpacity=.58, labelFontSize=11, titlePadding=9, labelPadding=6)
+        .configure_axisX(grid=False)
+        .configure_legend(orient="top", labelFontSize=11)
     )
-    st.altair_chart(chart, theme=None, **FULL_WIDTH)
+    st.altair_chart(chart, theme="streamlit", **FULL_WIDTH)
 
 
 def month_axis():
-    return alt.X("sale_date:T", title="Month", axis=alt.Axis(format="%b %y", tickCount=7))
+    return alt.X("sale_date:T", title=None, axis=alt.Axis(format="%b %y", tickCount=7))
 
 
 def month_bar_axis():
     return alt.X(
         "yearmonth(sale_date):O",
-        title="Month",
+        title=None,
         axis=alt.Axis(format="%b %y", labelAngle=0, labelOverlap="greedy"),
     )
 
@@ -413,65 +107,6 @@ def monthly_line(data, field, label, color=TEAL):
             tooltip=[month_tooltip(), alt.Tooltip(f"{field}:Q", title=label, format=",.2f")],
         )
     )
-
-
-def select_data_mode(mode):
-    st.session_state["data_mode"] = mode
-
-
-def source_actions():
-    with st.container(key="data_source_actions", horizontal=True, gap="small"):
-        if st.button(
-            "Explore demo", type="primary", icon=":material/arrow_forward:", icon_position="right",
-        ):
-            select_data_mode("demo")
-            st.switch_page(COPILOT_PAGE)
-        st.button("Use my data", icon=":material/upload_file:", on_click=select_data_mode, args=("upload",))
-
-
-def show_home(demo_csv):
-    with st.container(key="dashboard_home"):
-        introduction, preview = st.columns([1, 1.2], gap="medium")
-        with introduction, st.container(key="home_intro"):
-            st.markdown(
-                '<h1 class="fd-home-title">Financial<br>Dashboard</h1>'
-                '<p class="fd-home-copy">Explore sales and forecasts, or ask the AI Financial Copilot '
-                'about invoices and unusual transactions.</p>',
-                unsafe_allow_html=True,
-            )
-            source_actions()
-
-        with preview, st.container(key="home_preview"):
-            try:
-                sales = load_data(demo_csv)
-            except (OSError, ValueError):
-                st.info("The demo sales preview is unavailable. You can still upload your own CSV.")
-                return
-            if sales.empty:
-                st.info("The demo CSV has no valid sales to preview.")
-                return
-
-            start = sales["sale_date"].min().date()
-            end = sales["sale_date"].max().date()
-            metrics = calculate_metrics(sales)
-            st.markdown(
-                '<div class="fd-home-preview">'
-                '<h2>Demo sales overview</h2>'
-                f'<p class="fd-home-dates">{start:%b %Y} – {end:%b %Y}</p>'
-                '<dl class="fd-home-metrics">'
-                f'<div><dt>Total revenue</dt><dd>{metrics["total_revenue"]:,.2f}</dd></div>'
-                f'<div><dt>Transactions</dt><dd>{metrics["number_of_transactions"]:,}</dd></div>'
-                f'<div><dt>Customers</dt><dd>{metrics["number_of_customers"]:,}</dd></div>'
-                '</dl></div>',
-                unsafe_allow_html=True,
-            )
-            monthly = monthly_revenue(sales, start, end)
-            line = monthly_line(monthly, "revenue", "Revenue").encode(
-                x=alt.X("sale_date:T", title=None, axis=alt.Axis(format="%b %y", tickCount=4)),
-                y=alt.Y("revenue:Q", title="Monthly revenue", axis=alt.Axis(format="~s", tickCount=4)),
-            )
-            area = line.mark_area(color=TEAL, opacity=.09)
-            show_chart(area + line, height=174)
 
 
 def show_ranking(data, field, label, title, color):
@@ -497,50 +132,51 @@ def show_ranking(data, field, label, title, color):
         st.caption(f"Ranked by revenue. Sales with missing {label.lower()} are excluded.")
 
 
-def show_business(data, monthly, growth):
-    st.header("Business Performance")
+def show_overview(data, monthly, growth):
     metrics = calculate_metrics(data)
     kpi_cards([
-        ("Total Revenue", f"{metrics['total_revenue']:,.2f}"),
-        ("Customers", f"{metrics['number_of_customers']:,}"),
+        ("Total revenue", f"{metrics['total_revenue']:,.2f}"),
         ("Transactions", f"{metrics['number_of_transactions']:,}"),
-        ("Average Transaction Value", f"{metrics['average_transaction_value']:,.2f}"),
+        ("Customers", f"{metrics['number_of_customers']:,}"),
+        ("Average sale", f"{metrics['average_transaction_value']:,.2f}"),
     ])
 
-    with panel("monthly_revenue"):
-        st.subheader("Revenue Over Time")
-        show_chart(monthly_line(monthly, "revenue", "Monthly revenue"))
-        st.caption("Revenue in the selected period. The first and last months can be partial.")
-
-    with panel("revenue_growth"):
-        st.subheader("Revenue Growth")
-        valid_growth = growth.dropna(subset=["growth_pct"])
-        if valid_growth.empty:
-            st.info("Select at least two full months with positive revenue in the earlier month.")
-        else:
-            chart = (
-                alt.Chart(valid_growth)
-                .mark_bar(cornerRadiusEnd=3)
-                .encode(
-                    x=month_bar_axis(),
-                    y=alt.Y("growth_pct:Q", title="Growth (%)"),
-                    color=alt.condition(alt.datum.growth_pct < 0, alt.value(RED), alt.value(TEAL)),
-                    tooltip=[
-                        month_tooltip(),
-                        alt.Tooltip("growth_pct:Q", title="Growth (%)", format="+,.1f"),
-                    ],
-                )
+    with st.container(key="report_charts"):
+        revenue, change = st.columns([1.65, 1], gap="medium")
+        with revenue, panel("monthly_revenue"):
+            st.subheader("Revenue over time")
+            line = monthly_line(monthly, "revenue", "Monthly revenue").encode(
+                y=alt.Y("revenue:Q", title="Revenue", axis=alt.Axis(format="~s", tickCount=5)),
             )
-            show_chart(chart, height=210)
-            st.caption("Percentage change versus the previous full month. Red bars show a decline.")
+            show_chart(line.mark_area(color=TEAL, opacity=.12) + line, height=245)
+            st.caption("First and last months may be partial.")
+        with change, panel("revenue_growth"):
+            st.subheader("Monthly change")
+            valid_growth = growth.dropna(subset=["growth_pct"])
+            if valid_growth.empty:
+                st.info("Select at least two complete months to see the change.")
+            else:
+                chart = (
+                    alt.Chart(valid_growth)
+                    .mark_bar(cornerRadiusEnd=3)
+                    .encode(
+                        x=month_bar_axis(),
+                        y=alt.Y("growth_pct:Q", title="Change (%)", axis=alt.Axis(tickCount=5)),
+                        color=alt.condition(alt.datum.growth_pct < 0, alt.value(RED), alt.value(TEAL)),
+                        tooltip=[month_tooltip(), alt.Tooltip("growth_pct:Q", title="Change (%)", format="+,.1f")],
+                    )
+                )
+                show_chart(chart, height=245)
+                st.caption("Compared with the previous complete month.")
 
-    product, customer = st.columns(2)
-    with product:
-        show_ranking(data, "product_name", "Product name", "Top 10 Products by Revenue", TEAL)
-    with customer:
-        show_ranking(data, "customer_id", "Customer ID", "Top 10 Customers by Revenue", BLUE)
+    with st.container(key="ranking_charts"):
+        product, customer = st.columns(2, gap="medium")
+        with product:
+            show_ranking(data, "product_name", "Product name", "Top products", TEAL)
+        with customer:
+            show_ranking(data, "customer_id", "Customer ID", "Top customers", BLUE)
 
-    with st.expander("Data Preview"):
+    with st.expander("Transaction preview"):
         columns = ["sale_id", "sale_date", "customer_id", "product_name", "category", "revenue"]
         st.dataframe(
             data[columns].head(10),
@@ -554,88 +190,125 @@ def show_business(data, monthly, growth):
 
 
 def show_risk(data, growth, start_date, end_date):
-    st.header("Risk Analytics")
+    var = calculate_var(growth)
+    flagged = detect_anomalies(data)
+    metrics = []
+    if var is not None:
+        metrics.extend([
+            ("95% revenue VaR", f"{var['var_pct']:.1f}%"),
+            ("Estimated shortfall", f"{var['shortfall']:,.2f}"),
+        ])
+    if flagged is not None:
+        metrics.append(("Transactions to review", f"{len(flagged):,}"))
+    if metrics:
+        kpi_cards(metrics)
 
-    with panel("volatility"):
-        st.subheader("Revenue Growth Volatility")
-        risk = rolling_volatility(growth)
-        if risk["volatility"].notna().any():
-            show_chart(monthly_line(risk, "volatility", "Volatility (percentage points)", BLUE))
-            st.caption(
-                "Six-month rolling standard deviation of monthly revenue growth. "
-                "Higher values mean less stable growth."
+    with st.container(key="report_charts"):
+        volatility_panel, anomalies_panel = st.columns(2, gap="medium")
+        with volatility_panel, panel("volatility"):
+            st.subheader("Revenue volatility")
+            risk = rolling_volatility(growth)
+            if risk["volatility"].notna().any():
+                show_chart(monthly_line(risk, "volatility", "Volatility (pp)", BLUE), height=218)
+                st.caption("Rolling six-month standard deviation of monthly revenue growth.")
+            else:
+                st.info("Select seven complete months with consecutive growth observations.")
+        with anomalies_panel, panel("anomaly_trend"):
+            st.subheader("Flags by month")
+            if flagged is None:
+                st.info("Select a period with at least 20 valid transactions.")
+            else:
+                trend = anomaly_trend(flagged, start_date, end_date)
+                chart = (
+                    alt.Chart(trend)
+                    .mark_bar(color=AMBER, cornerRadiusEnd=3)
+                    .encode(
+                        x=month_bar_axis(),
+                        y=alt.Y("anomalies:Q", title="Flagged transactions", axis=alt.Axis(tickMinStep=1)),
+                        tooltip=[month_tooltip(), alt.Tooltip("anomalies:Q", title="Flagged transactions")],
+                    )
+                )
+                show_chart(chart, height=218)
+                st.caption(f"{len(flagged):,} of {len(data):,} transactions flagged by the IQR rule.")
+
+    if var is not None:
+        baseline_month = var["baseline_month"].strftime("%b %Y")
+        with st.expander("About the risk estimate"):
+            st.write(
+                f"The historical estimate uses the 5th percentile of {var['observations']} monthly growth "
+                f"observations and {baseline_month} revenue of {var['baseline_revenue']:,.2f}. Future losses can exceed it."
             )
-        else:
-            st.info("Select at least seven full months with consecutive valid growth observations.")
+    else:
+        st.caption("Revenue VaR needs 12 valid monthly growth observations.")
+
+    if flagged is not None:
+        with st.expander("Transactions to review"):
+            st.caption(
+                "The IQR rule flags amounts beyond 1.5 times the interquartile range. "
+                "Categories with fewer than 20 rows use the selected transactions as the comparison group."
+            )
+            if flagged.empty:
+                st.info("No transactions were flagged in this period.")
+            else:
+                columns = [
+                    "sale_date", "sale_id", "customer_id", "product_name",
+                    "category", "revenue", "threshold", "reason", "comparison",
+                ]
+                st.dataframe(
+                    flagged[columns], hide_index=True, **FULL_WIDTH,
+                    column_config={
+                        "sale_date": st.column_config.DateColumn("Sale date", format="YYYY-MM-DD"),
+                        "sale_id": "Sale ID",
+                        "customer_id": "Customer ID",
+                        "product_name": "Product",
+                        "category": "Category",
+                        "revenue": st.column_config.NumberColumn("Revenue", format="%.2f"),
+                        "threshold": st.column_config.NumberColumn("Threshold", format="%.2f"),
+                        "reason": "Flag reason",
+                        "comparison": "Comparison group",
+                    },
+                )
 
     with panel("portfolio"):
-        st.subheader("Portfolio Performance")
+        st.subheader("Revenue mix")
         portfolio, summary = portfolio_performance(data, start_date, end_date)
-        category_order = summary["category"].tolist()
         chart = (
             alt.Chart(portfolio)
             .mark_bar()
             .encode(
                 x=month_bar_axis(),
                 y=alt.Y("revenue:Q", title="Monthly revenue", stack="zero"),
-                color=alt.Color(
-                    "category:N",
-                    title="Product category",
-                    scale=alt.Scale(domain=category_order, range=PALETTE[:len(category_order)]),
-                ),
+                color=alt.Color("category:N", title="Product category", sort=summary["category"].tolist()),
                 tooltip=[
-                    month_tooltip(),
-                    alt.Tooltip("category:N", title="Category"),
+                    month_tooltip(), alt.Tooltip("category:N", title="Category"),
                     alt.Tooltip("revenue:Q", title="Revenue", format=",.2f"),
                 ],
             )
         )
-        show_chart(chart)
-        st.caption(
-            "Product categories make up the business portfolio here. "
-            "The chart shows each category's contribution to monthly sales revenue."
-        )
-        st.dataframe(
-            summary,
-            hide_index=True,
-            **FULL_WIDTH,
-            column_config={
-                "category": "Category",
-                "revenue": st.column_config.NumberColumn("Total revenue", format="%.2f"),
-                "share_pct": st.column_config.NumberColumn("Revenue share (%)", format="%.1f"),
-            },
-        )
-
-    with panel("value_at_risk"):
-        st.subheader("Value at Risk (95%)")
-        var = calculate_var(growth)
-        if var is None:
-            st.info(
-                "VaR needs 12 valid monthly growth observations. "
-                "Select a longer period covering at least 13 full months."
-            )
-        else:
-            kpi_cards([
-                ("Monthly Revenue VaR", f"{var['var_pct']:.2f}%"),
-                ("Estimated Revenue Shortfall", f"{var['shortfall']:,.2f}"),
-            ])
-            baseline_month = var["baseline_month"].strftime("%b %Y")
-            st.caption(
-                f"Based on the 5th percentile of {var['observations']} historical monthly "
-                f"growth observations. The amount is relative to {baseline_month} revenue "
-                f"of {var['baseline_revenue']:,.2f}. This is an estimate; worse outcomes are possible."
+        show_chart(chart, height=235)
+        with st.expander("Category breakdown"):
+            st.dataframe(
+                summary, hide_index=True, **FULL_WIDTH,
+                column_config={
+                    "category": "Category",
+                    "revenue": st.column_config.NumberColumn("Total revenue", format="%.2f"),
+                    "share_pct": st.column_config.NumberColumn("Revenue share (%)", format="%.1f"),
+                },
             )
 
 
 def show_predictions(growth):
-    st.header("Predictive Analytics")
     results = revenue_forecast(growth)
     if results is None:
         st.info("Select at least 12 full calendar months to train and test the forecast.")
         return
 
+    kpi_cards([
+        (row.sale_date.strftime("%b %Y"), f"{row.revenue:,.2f}")
+        for row in results["future"].itertuples()
+    ])
     with panel("forecast"):
-        st.subheader("Revenue Forecast")
+        st.subheader("Revenue forecast")
         actual = growth[["sale_date", "revenue"]].assign(series="Observed")
         future = results["future"].assign(series="Forecast")
         forecast_data = pd.concat([actual, future], ignore_index=True)
@@ -648,7 +321,7 @@ def show_predictions(growth):
                 y=alt.Y("revenue:Q", title="Monthly revenue", scale=alt.Scale(zero=True)),
                 color=alt.Color(
                     "series:N", title=None,
-                    scale=alt.Scale(domain=series_order, range=[TEAL, AMBER]),
+                    scale=alt.Scale(domain=series_order),
                 ),
                 strokeDash=alt.StrokeDash(
                     "series:N", title=None,
@@ -667,8 +340,7 @@ def show_predictions(growth):
             "period. It uses the previous month's revenue and the average of the past three months."
         )
 
-    with panel("predictions"):
-        st.subheader("ML Predictions")
+    with st.expander("Backtest by month"):
         st.caption(
             f"Ridge regression trains on the first {results['train_count']} months and is "
             f"tested on the last {results['test_count']} months. Each test prediction uses only "
@@ -688,7 +360,7 @@ def show_predictions(growth):
         )
 
     with panel("model_performance"):
-        st.subheader("Model Performance")
+        st.subheader("Forecast accuracy")
         errors = pd.DataFrame({
             "Model": ["Ridge regression", "Last month baseline"],
             "MAE": [results["mae"], results["baseline_mae"]],
@@ -713,63 +385,6 @@ def show_predictions(growth):
             st.caption("Ridge regression had a lower MAE on this test period.")
 
 
-def show_anomalies(data, start_date, end_date):
-    st.header("Anomaly Detection")
-    flagged = detect_anomalies(data)
-    if flagged is None:
-        st.info("Select a period with at least 20 valid transactions to detect anomalies.")
-        return
-
-    kpi_cards([("Number of Detected Anomalies", f"{len(flagged):,}")])
-    st.caption(
-        f"Flagged {len(flagged):,} of {len(data):,} selected transactions. The IQR rule "
-        "flags amounts outside the middle 50% range extended by 1.5 times its width on "
-        "each side. Categories with fewer than 20 rows use the selected transactions as "
-        "the comparison group. Flags identify transactions to review."
-    )
-
-    with panel("flagged_transactions"):
-        st.subheader("Suspicious Transactions")
-        if flagged.empty:
-            st.info("No transactions were flagged in this period.")
-        else:
-            columns = [
-                "sale_date", "sale_id", "customer_id", "product_name",
-                "category", "revenue", "threshold", "reason", "comparison",
-            ]
-            st.dataframe(
-                flagged[columns],
-                hide_index=True,
-                **FULL_WIDTH,
-                column_config={
-                    "sale_date": st.column_config.DateColumn("Sale date", format="YYYY-MM-DD"),
-                    "sale_id": "Sale ID",
-                    "customer_id": "Customer ID",
-                    "product_name": "Product",
-                    "category": "Category",
-                    "revenue": st.column_config.NumberColumn("Revenue", format="%.2f"),
-                    "threshold": st.column_config.NumberColumn("Threshold", format="%.2f"),
-                    "reason": "Flag reason",
-                    "comparison": "Comparison group",
-                },
-            )
-
-    with panel("anomaly_trend"):
-        st.subheader("Anomaly Trends")
-        trend = anomaly_trend(flagged, start_date, end_date)
-        chart = (
-            alt.Chart(trend)
-            .mark_bar(color=AMBER, cornerRadiusEnd=3)
-            .encode(
-                x=month_bar_axis(),
-                y=alt.Y("anomalies:Q", title="Flagged transactions", axis=alt.Axis(tickMinStep=1)),
-                tooltip=[month_tooltip(), alt.Tooltip("anomalies:Q", title="Flagged transactions")],
-            )
-        )
-        show_chart(chart, height=210)
-        st.caption("Number of flagged transactions by month within the selected dates.")
-
-
 def demo_csv_path():
     folder = Path(__file__).resolve().parent
     path = folder / "clean_financial_data.csv"
@@ -791,12 +406,13 @@ def save_upload():
         st.session_state["sales_file_error"] = "No valid transactions were found in the CSV."
         return
     source = f"csv:{sha256(uploaded_file.getbuffer()).hexdigest()}"
-    st.session_state["uploaded_sales"] = (data, source)
+    st.session_state["uploaded_sales"] = (data, source, uploaded_file.name)
 
 
 def active_sales(is_demo):
     if not is_demo:
-        return st.session_state.get("uploaded_sales")
+        record = st.session_state.get("uploaded_sales")
+        return record[:2] if record else None
     try:
         data = load_data(demo_csv_path())
     except (OSError, ValueError):
@@ -808,13 +424,13 @@ def active_sales(is_demo):
     return data, "demo"
 
 
-def reporting_period(data, source, *, expanded=False):
+def reporting_period(data, source):
     first_date = data["sale_date"].min().date()
     last_date = data["sale_date"].max().date()
     saved_periods = st.session_state.setdefault("reporting_periods", {})
     start, end = saved_periods.get(source, (first_date, last_date))
     date_key = f"{source}:{first_date}:{last_date}"
-    with st.sidebar.expander("Reporting period", expanded=expanded):
+    with st.expander("Reporting period"):
         start = st.date_input(
             "Start date", max(first_date, min(start, last_date)),
             min_value=first_date, max_value=last_date, key=f"start_{date_key}",
@@ -830,96 +446,114 @@ def reporting_period(data, source, *, expanded=False):
     return start, end
 
 
-def dashboard():
-    mode = st.session_state.get("data_mode")
-    if mode is None:
-        show_home(demo_csv_path())
-        return
+@dataclass(frozen=True)
+class Report:
+    sales: pd.DataFrame
+    source: str
+    start: date
+    end: date
 
-    hero()
-    source_actions()
-    with st.sidebar:
-        sidebar_brand()
-    is_demo = mode == "demo"
-    if not is_demo:
-        st.file_uploader("Upload your sales CSV", type=["csv"], key="sales_file", on_change=save_upload)
+    @property
+    def is_demo(self):
+        return self.source == "demo"
+
+    def transactions(self):
+        return self.sales[self.sales.sale_date.between(pd.Timestamp(self.start), pd.Timestamp(self.end))]
+
+
+def sidebar_report():
+    mode = st.segmented_control(
+        "Data source", ["demo", "upload"],
+        format_func={"demo": "Demo data", "upload": "My data"}.get,
+        default="demo", required=True, width="stretch", key="data_mode",
+    )
+    if mode == "upload":
+        selected = st.file_uploader("Sales CSV", type=["csv"], key="sales_file", on_change=save_upload)
+        if selected is None and (previous := st.session_state.get("uploaded_sales")):
+            st.text(previous[2])
         st.download_button(
             "Download CSV template",
             data=",".join(REQUIRED_COLUMNS) + "\nS001,2025-01-01,120,C001,P001,Desk,Office\n",
-            file_name="sales_template.csv",
-            mime="text/csv",
-            on_click="ignore",
+            file_name="sales_template.csv", mime="text/csv", on_click="ignore",
+            icon=":material/download:",
         )
         if error := st.session_state.get("sales_file_error"):
             st.error(error)
 
-    current = active_sales(is_demo)
+    current = active_sales(mode == "demo")
     if current is None:
-        return
-    all_data, source = current
-    period = reporting_period(all_data, source, expanded=True)
-    if period is None:
-        return
-    start_date, end_date = period
-    data = all_data[all_data["sale_date"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))]
+        return None
+    sales, source = current
+    period = reporting_period(sales, source)
+    return Report(sales, source, *period) if period else None
+
+
+def report_transactions(title, report):
+    if report is None:
+        st.title(title, anchor=False)
+        if st.session_state.get("data_mode") == "upload" and "uploaded_sales" not in st.session_state:
+            st.info("Choose a sales CSV in the sidebar to view your report.")
+        return None
+    page_heading(title, report)
+    data = report.transactions()
     if data.empty:
-        st.info("No transactions in this period. Try a wider date range.")
-        return
-
-    source_label = "Demo ERP data" if is_demo else "Uploaded sales CSV"
-    st.markdown(
-        '<div class="fd-period"><strong>'
-        f'{start_date:%d %b %Y} – {end_date:%d %b %Y}'
-        f'</strong><span>{source_label}</span><span>{len(data):,} transactions in view</span>'
-        '<span>Amounts shown in the CSV currency</span></div>',
-        unsafe_allow_html=True,
-    )
-
-    monthly = monthly_revenue(data, start_date, end_date)
-    growth = monthly_growth(data, start_date, end_date)
-    business, risk, predictions, anomalies = st.tabs([
-        "Business Performance", "Risk Analytics", "Predictive Analytics", "Anomaly Detection",
-    ])
-    with business:
-        show_business(data, monthly, growth)
-    with risk:
-        show_risk(data, growth, start_date, end_date)
-    with predictions:
-        show_predictions(growth)
-    with anomalies:
-        show_anomalies(data, start_date, end_date)
+        st.info("No transactions match these dates. Select a wider period in the sidebar.")
+        return None
+    return data
 
 
-def copilot_workspace():
-    is_demo = st.session_state.setdefault("data_mode", "demo") == "demo"
-    current = active_sales(is_demo)
-    if current is None:
+def overview(report):
+    data = report_transactions("Overview", report)
+    if data is not None:
+        monthly = monthly_revenue(data, report.start, report.end)
+        growth = monthly_growth(data, report.start, report.end)
+        show_overview(data, monthly, growth)
+
+
+def forecast(report):
+    data = report_transactions("Forecast", report)
+    if data is not None:
+        show_predictions(monthly_growth(data, report.start, report.end))
+
+
+def risk_and_anomalies(report):
+    data = report_transactions("Risk & anomalies", report)
+    if data is not None:
+        show_risk(data, monthly_growth(data, report.start, report.end), report.start, report.end)
+
+
+def copilot_workspace(report):
+    if report is None:
         st.title("AI Financial Copilot", anchor=False)
-        if not is_demo:
-            st.info("Upload a sales CSV on the Dashboard to start a chat with your data.")
+        if st.session_state.get("data_mode") == "upload" and "uploaded_sales" not in st.session_state:
+            st.info("Choose a sales CSV in the sidebar to start a chat with your data.")
         return
-    data, source = current
-    period = reporting_period(data, source)
-    if period is None:
-        return
-    start, end = period
     with st.container(key="copilot_page"):
         try:
-            with FinancialCopilot(sales_data=data, use_demo_erp=is_demo) as copilot:
-                render_chat_panel(copilot, start_date=start, end_date=end, source=source)
+            with FinancialCopilot(sales_data=report.sales, use_demo_erp=report.is_demo) as copilot:
+                render_chat_panel(copilot, start_date=report.start, end_date=report.end, source=report.source)
         except (FileNotFoundError, ValueError) as error:
             st.error(f"Financial Copilot could not load data: {error}")
 
 
-COPILOT_PAGE = st.Page(copilot_workspace, title="AI Financial Copilot", url_path="copilot", icon=":material/insights:")
-
-
 def main():
-    apply_style()
-    st.navigation([
-        st.Page(dashboard, title="Dashboard", icon=":material/dashboard:", default=True),
-        COPILOT_PAGE,
-    ]).run()
+    st.html(Path(__file__).with_name("dashboard.css"))
+    with st.sidebar:
+        st.html('<div class="fd-brand">Financial Dashboard</div>')
+        navigation = st.container(key="workspace_nav", gap=None)
+        st.divider()
+        report = sidebar_report()
+    pages = [
+        st.Page(lambda: overview(report), title="Overview", icon=":material/space_dashboard:", default=True),
+        st.Page(lambda: forecast(report), title="Forecast", icon=":material/timeline:", url_path="forecast"),
+        st.Page(lambda: risk_and_anomalies(report), title="Risk & anomalies", icon=":material/monitoring:", url_path="risk"),
+        st.Page(lambda: copilot_workspace(report), title="AI Financial Copilot", icon=":material/insights:", url_path="copilot"),
+    ]
+    selected = st.navigation(pages, position="hidden")
+    with navigation:
+        for page in pages:
+            st.page_link(page, width="stretch")
+    selected.run()
 
 
 if __name__ == "__main__":
